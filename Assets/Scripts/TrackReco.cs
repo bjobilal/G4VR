@@ -18,6 +18,7 @@ using UnityEngine.Experimental.GlobalIllumination;
 using System.Text.RegularExpressions;
 using JetBrains.Annotations;
 using XCharts.Runtime;
+using UnityEngine.SceneManagement;
 
 
 
@@ -36,6 +37,7 @@ public class NewBehaviourScript : MonoBehaviour
     [SerializeField] Material markerMat;
     
     public static List<Matrix4x4> markerMatrices = new List<Matrix4x4>();
+    bool drawMeshes = true;
 
     public static List<GameObject> tracks = new List<GameObject>();
     public static Dictionary<string, Dictionary<int, Track>> trackInfo = new Dictionary<string, Dictionary<int, Track>>(); // the int in the dictionary is the track id
@@ -97,6 +99,7 @@ public class NewBehaviourScript : MonoBehaviour
 
         trackInfo.Clear();
         tracks.Clear();
+        markerMatrices.Clear();
 
         time = GameObject.Find("Time");
         start_time = GameObject.Find("Start");
@@ -110,7 +113,7 @@ public class NewBehaviourScript : MonoBehaviour
         Controls = GameObject.Find("CPanel");
         Menus = GameObject.Find("MPanel");
 
-        //time_controller = GameObject.Find("TSlider").GetComponent<Slider>();
+        time_controller = GameObject.Find("TSlider").GetComponent<Slider>();
         //playButton = GameObject.Find("TPlay").GetComponent<Button>();
 
         Shader shader = Shader.Find("Standard");
@@ -129,18 +132,23 @@ public class NewBehaviourScript : MonoBehaviour
 
         time_controller.maxValue = sortedKeys.Count - 1;
         time_controller.minValue = 0;
-        time_controller.value = sortedKeys.Count - 1;
+        time_controller.SetValueWithoutNotify(sortedKeys.Count - 1);
         time.transform.GetComponent<TextMeshProUGUI>().text = null;
+
+        time_controller.onValueChanged.AddListener((interactor) => SteppedTracks(time_controller));
 
         // additional functions (if any)
 
         Format_Cuts(); // THIS HAS BEEN COMMENTED OUT JUST TO TEST THE G4VR VIS STUFF
                        //TrackAnalyser.Starter();
                        //SimTracks();
-
-        // The following is the command to spontaneously start the movies once the scene is created
-        // ONLY USE THIS FOR EDITOR DEBUGGING
-        //StartCoroutine(waiting());
+       
+        // only for custom scene since settings are not initialized in the inspector
+        if (SceneManager.GetActiveScene().name=="Custom")
+        {
+            UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Configuring settings for Custom scene");
+            configureSettings();
+        }
         
     }
 
@@ -159,26 +167,29 @@ public class NewBehaviourScript : MonoBehaviour
 
     void LateUpdate()
     {
-        for (int i = 0; i < markerMatrices.Count; i += 1023)
+        if (drawMeshes == true)
         {
-            int count = Mathf.Min(1023, markerMatrices.Count - i);
+            for (int i = 0; i < markerMatrices.Count; i += 1023)
+            {
+                int count = Mathf.Min(1023, markerMatrices.Count - i);
 
-            Graphics.DrawMeshInstanced(
-                markerMesh,
-                0,
-                markerMat,
-                markerMatrices.GetRange(i, count),
-                null,
-                UnityEngine.Rendering.ShadowCastingMode.Off,
-                false
-            );
+                Graphics.DrawMeshInstanced(
+                    markerMesh,
+                    0,
+                    markerMat,
+                    markerMatrices.GetRange(i, count),
+                    null,
+                    UnityEngine.Rendering.ShadowCastingMode.Off,
+                    false
+                );
+            }
         }
     }
 
     void ReadCSV(TextAsset file, bool dummy) 
     {
-        // As of 10/16/2025, the expected input format of the csv file is as follows:
-        // track/hit , ID, particle, charge, step, x, y, z, time of step, edep, process, px, py, pz, energy. 
+        // As of 2/2/2026, the expected input format of the csv file is as follows:
+        // track/hit , ID, particle, charge, step, x, y, z, time of step, edep, process, px, py, pz, energy, R, G, B  
         string[] lines = Regex.Split(file.text, "\r\n|\r|\n");
         bool headerSkipped = false;
         maxT = 0.0;
@@ -210,12 +221,17 @@ public class NewBehaviourScript : MonoBehaviour
                 if (!checkScale)
                 {
                     checkedScale = checkScaleFromPosition(poss.Max());
-                    GameObject Geometry = GameObject.Find("Scene");
-                    if (Geometry != null)
+                    GameObject[] geometries ={ GameObject.Find("Scene"),GameObject.Find("exampleB3a_scene"),GameObject.Find("exampleB4a_scene"), GameObject.Find("exampleB5_scene") };
+
+                    foreach (GameObject geo in geometries)
                     {
-                        Geometry.transform.localScale = new Vector3(checkedScale, checkedScale, checkedScale);
+                        if (geo != null)
+                        {
+                            geo.transform.localScale =
+                                Vector3.one * checkedScale;
+                        }
                     }
-                    //UnityEngine.Debug.Log("[NewBehaviourScript] From tracks, checkedScale set to " + checkedScale);
+
                     checkScale = true;
                 }
                 posX = -float.Parse(values[5])*checkedScale;
@@ -341,7 +357,7 @@ public class NewBehaviourScript : MonoBehaviour
 
         sortedKeys = time_control.Keys.OrderBy(key => key).ToList();
 
-        //Debug.Log($"Sorted Keys length: {sortedKeys.Count}");
+        Debug.Log($"Sorted Keys length: {sortedKeys.Count}");
 
         // time slider details
         stop_time.GetComponent<TextMeshProUGUI>().text = sortedKeys.Select(s => Convert.ToDouble(s)).Max().ToString();
@@ -350,6 +366,20 @@ public class NewBehaviourScript : MonoBehaviour
         status.transform.GetComponent<TextMeshProUGUI>().color = Color.green;
 
         AnalysisBoard.SetActive(false);
+    }
+
+    private void configureSettings()
+    {
+        GameObject cutsButton = GameObject.Find("CButton");
+        GameObject movieButton = GameObject.Find("MButton");
+        GameObject edepButton = GameObject.Find("Edep");
+        cutsButton.GetComponent<Button>().onClick.AddListener(ShowCutsBoard);
+        movieButton.GetComponent<Button>().onClick.AddListener(movie_init);
+
+        TrackAnalyser runningInstance = GetComponent<TrackAnalyser>(); 
+        edepButton.GetComponent<Button>().onClick.AddListener(() => runningInstance.ModeSwitch(edepButton));
+
+        //UnityEngine.Debug.Log(movieButton);
     }
 
     private float checkScaleFromPosition(float val)
@@ -419,6 +449,7 @@ public class NewBehaviourScript : MonoBehaviour
         }
     }
 
+    //[DEPRECATED]
     public async void SimTracks()
     {
 
@@ -492,6 +523,7 @@ public class NewBehaviourScript : MonoBehaviour
                 track.trackObj.SetActive(false);
         }
 
+        drawMeshes = false;
         Menus.SetActive(false);
         Controls.SetActive(false);
 
@@ -514,6 +546,7 @@ public class NewBehaviourScript : MonoBehaviour
 
         Menus.SetActive(true);
         Controls.SetActive(true);
+        drawMeshes = true;
     }
 
     // --- Main playback controller ---
@@ -677,10 +710,13 @@ public class NewBehaviourScript : MonoBehaviour
 
     public void Format_Cuts()
     {
-       Transform content = CutsBoard.transform.GetChild(1).GetChild(0).GetChild(0);
-
+        Transform content = CutsBoard.transform.GetChild(1).GetChild(0).GetChild(0);
+        foreach (Transform child in content)
+            Destroy(child.gameObject);
+        
         foreach (string pname in particles_in_scene)
         {
+            //UnityEngine.Debug.Log("[FORMAT-CUTS] Adding cut option for "+ pname);
             GameObject temp = Instantiate(toggle_prefab);
             temp.GetComponentInChildren<UnityEngine.UI.Text>().text = pname;
             temp.GetComponent<Toggle>().isOn = true;
@@ -906,14 +942,14 @@ public class ParseHelper : MonoBehaviour
         ["h"] = 3600f * 1e12f  
     };
 
-    private static Dictionary<string, float> EUnits = new Dictionary<string, float>()
+    private static Dictionary<string, float> EUnits = new Dictionary<string, float>() // express all energy values in MeV
     {
-        ["meV"] = 1e9f,
-        ["eV"] = 1e6f,
-        ["keV"] = 1e3f,
+        ["meV"] = 1e-9f,
+        ["eV"] = 1e-6f,
+        ["keV"] = 1e-3f,
         ["MeV"] = 1f,
-        ["GeV"] = 1e-3f,
-        ["TeV"] = 1e-6f,
+        ["GeV"] = 1e3f,
+        ["TeV"] = 1e6f,
     };
 
     public static double ParseTime(string fullstr)

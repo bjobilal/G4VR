@@ -233,27 +233,7 @@ public class TrackAnalyser : MonoBehaviour
         List<double> edeps = edep_bypiece[obj];
         double total = edep_bypiece[obj].Sum();
 
-        /* -- Charting Logic -- does not look good --
-        BarChart chart = edep_logging.transform.GetChild(1).GetComponent<BarChart>();
-        if (chart == null)
-        {
-            Debug.LogWarning("BarChart component not found!");
-            return;
-        }
-
-        // Try to find "Serie0" field
-        chart.RemoveAllSerie();
-
-        chart.AddSerie<Bar>();
-
-        for (int i = 0; i < edeps.Count; i++)
-        {
-            chart.AddXAxisData($"{edeps[i]}");
-            chart.AddData(0, Mathf.Log10(edeps.Count(x => x == edeps[i])));
-            //chart.AddData(0, edeps.Count(x => x == edeps[i]));
-        }*/ 
-
-        edep_logging.transform.GetChild(0).GetComponent<TextMeshProUGUI>().text = "Edep: "+total.ToString("0.0000000E+0") + " eV"; // looks very empty, but what more can one do ??
+        edep_logging.transform.GetChild(0).GetComponent<TextMeshProUGUI>().text = "Edep: "+total.ToString("0.0000000E+0") + " MeV"; 
 
         
 
@@ -343,9 +323,9 @@ public class TrackAnalyser : MonoBehaviour
         if (color_board != null)
         {
             color_board.transform.GetChild(0).gameObject.SetActive(true);
-            color_board.transform.GetChild(0).GetChild(0).GetComponent<TMPro.TextMeshProUGUI>().text = maxEdep.ToString("0.000E+0") + " eV";
-            color_board.transform.GetChild(0).GetChild(1).GetComponent<TMPro.TextMeshProUGUI>().text = ((maxEdep + minEdep) / 2).ToString("0.000E+0") + " eV";
-            color_board.transform.GetChild(0).GetChild(2).GetComponent<TMPro.TextMeshProUGUI>().text = minEdep.ToString("0.000E+0") + " eV";
+            color_board.transform.GetChild(0).GetChild(0).GetComponent<TMPro.TextMeshProUGUI>().text = maxEdep.ToString("0.000E+0") + " MeV";
+            color_board.transform.GetChild(0).GetChild(1).GetComponent<TMPro.TextMeshProUGUI>().text = ((maxEdep + minEdep) / 2).ToString("0.000E+0") + " MeV";
+            color_board.transform.GetChild(0).GetChild(2).GetComponent<TMPro.TextMeshProUGUI>().text = minEdep.ToString("0.000E+0") + " MeV";
         }
     }
 

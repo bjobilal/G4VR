@@ -10621,6 +10621,9 @@ MonoBehaviour:
   minT: 0
   playButton: {fileID: 1600308821}
   file: {fileID: 4900000, guid: 242f54b191122b14ea5d23900db1fd23, type: 3}
+  checkScale: 0
+  checkedScale: 1
+  appliedScaleToGeometry: 0
   movieDuration: 30
 --- !u!4 &1373545543
 Transform:
@@ -12516,7 +12519,7 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_text: Cuts
+  m_text: Filter Tracks
   m_isRightToLeft: 0
   m_fontAsset: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
   m_sharedMaterial: {fileID: 2180264, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
@@ -13428,7 +13431,7 @@ GameObject:
   - component: {fileID: 1600308822}
   - component: {fileID: 1600308821}
   m_Layer: 5
-  m_Name: Play
+  m_Name: TPlay
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -18632,7 +18635,7 @@ GameObject:
   - component: {fileID: 2146586872}
   - component: {fileID: 2146586871}
   m_Layer: 5
-  m_Name: Slider
+  m_Name: TSlider
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
