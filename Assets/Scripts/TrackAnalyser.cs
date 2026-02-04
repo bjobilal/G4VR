@@ -209,14 +209,14 @@ public class TrackAnalyser : MonoBehaviour
                         {
                             geo.Value.Add(currTrack.edeps[i]);
                             totaledep += currTrack.edeps[i];
-                            Debug.Log($"{tempCollider.gameObject.name} has edep: {currTrack.edeps[i]} from {segmentCollider.gameObject.name} and step {i}");
+                            //Debug.Log($"{tempCollider.gameObject.name} has edep: {currTrack.edeps[i]} from {segmentCollider.gameObject.name} and step {i}");
                         }
 
                     }
                 }
             }
 
-            Debug.Log($"{temp.name} has total edep: {totaledep}");
+            //Debug.Log($"{temp.name} has total edep: {totaledep}");
         }
 
     }
@@ -271,7 +271,7 @@ public class TrackAnalyser : MonoBehaviour
 
             if (totaledep <= 0)
             {
-                // No deposition → faint white
+                // No deposition == faint white
                 targetColor = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
             }
             else if (totaledep < edepThreshold)
@@ -335,21 +335,17 @@ public class TrackAnalyser : MonoBehaviour
         {
             // --- Switching TO Edep scene ---
 
-            // Clear any previously stored original materials
             originalMaterials.Clear();
 
-            // 0) Prepare objects for coloring: store original and set faint white
             foreach (var geo in edep_bypiece)
             {
                 GameObject obj = geo.Key;
                 Renderer rend = obj.GetComponent<Renderer>();
                 if (rend != null)
                 {
-                    // Store original material
                     if (!originalMaterials.ContainsKey(obj))
                         originalMaterials[obj] = rend.material;
 
-                    // Replace with Standard shader material, faint white
                     Material mat = new Material(Shader.Find("Standard"));
                     mat.color = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
                     mat.color = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
@@ -365,10 +361,8 @@ public class TrackAnalyser : MonoBehaviour
                 }
             }
 
-            // Update Scene button label
             SceneSwitchButton.transform.GetComponentInChildren<TMPro.TextMeshProUGUI>().text = "Tracks";
 
-            // Disable line segment colliders
             foreach (var typeEntry in trackInfo)
             {
                 foreach (var track in typeEntry.Value)
@@ -381,7 +375,6 @@ public class TrackAnalyser : MonoBehaviour
                 }
             }
 
-            // Hide UI elements
             if (carousel != null) carousel.SetActive(false);
             time_board.SetActive(false);
             movie_button.SetActive(false);
@@ -391,6 +384,8 @@ public class TrackAnalyser : MonoBehaviour
             // --- Switching BACK from Edep scene ---
 
             // Update Scene button label
+            SceneSwitchButton = GameObject.Find("Edep");
+            //UnityEngine.Debug.Log("[TRACK-ANALYSER] Scene Switch Button is set to "+SceneSwitchButton);
             SceneSwitchButton.transform.GetComponentInChildren<TMPro.TextMeshProUGUI>().text = "Edep";
 
             // Enable line segment colliders
