@@ -1291,7 +1291,7 @@ MonoBehaviour:
   m_StopLineAtFirstRaycastHit: 1
   m_StopLineAtSelection: 0
   m_SnapEndpointIfAvailable: 0
-  m_LineBendRatio: 0.5
+  m_LineBendRatio: 1
   m_OverrideInteractorLineOrigin: 1
   m_LineOriginTransform: {fileID: 0}
   m_LineOriginOffset: 0
@@ -10620,7 +10620,7 @@ MonoBehaviour:
   maxT: 0
   minT: 0
   playButton: {fileID: 1600308821}
-  file: {fileID: 4900000, guid: 242f54b191122b14ea5d23900db1fd23, type: 3}
+  file: {fileID: 4900000, guid: 13e4108b1c05210449562beb985f71ea, type: 3}
   checkScale: 0
   checkedScale: 1
   appliedScaleToGeometry: 0
@@ -10634,7 +10634,7 @@ Transform:
   m_GameObject: {fileID: 1373545541}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 50, y: 50, z: 50}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -14031,7 +14031,7 @@ MonoBehaviour:
   m_StopLineAtFirstRaycastHit: 1
   m_StopLineAtSelection: 0
   m_SnapEndpointIfAvailable: 0
-  m_LineBendRatio: 0.5
+  m_LineBendRatio: 1
   m_OverrideInteractorLineOrigin: 1
   m_LineOriginTransform: {fileID: 0}
   m_LineOriginOffset: 0

@@ -131,14 +131,14 @@ public class NewBehaviourScript : MonoBehaviour
         ReadCSV(file, true);
         DrawTracks(1f);
 
-        // time slider settings
+        // time slider settings --> now offloaded to TrackMeshRenderer
 
-        time_controller.maxValue = sortedKeys.Count - 1;
-        time_controller.minValue = 0;
-        time_controller.SetValueWithoutNotify(sortedKeys.Count - 1);
-        time.transform.GetComponent<TextMeshProUGUI>().text = null;
+        //time_controller.maxValue = sortedKeys.Count - 1;
+        //time_controller.minValue = 0;
+        //time_controller.SetValueWithoutNotify(sortedKeys.Count - 1);
+        //time.transform.GetComponent<TextMeshProUGUI>().text = null;
 
-        time_controller.onValueChanged.AddListener((interactor) => SteppedTracks(time_controller));
+        //time_controller.onValueChanged.AddListener((interactor) => SteppedTracks(time_controller));
 
         // additional functions (if any)
 
@@ -376,12 +376,12 @@ public class NewBehaviourScript : MonoBehaviour
 
         // initializing the unified mesh and the colliders
 
-        /*foreach (var track in trackInstances)
-            track.DrawTrack(time_control);*/
-
         TrackMeshRenderer trackMeshRenderer = gameObject.AddComponent<TrackMeshRenderer>();
         trackMeshRenderer.trackInstances = trackInstances;
+        trackMeshRenderer.time_slider = time_controller;
         trackMeshRenderer.BuildMesh();
+
+        trackMeshRenderer.SliderSetup();
 
         //trackMeshRenderer.SetTimeIndex(currentTimeIndex);
 
@@ -545,6 +545,8 @@ public class NewBehaviourScript : MonoBehaviour
         drawMeshes = false;
         Menus.SetActive(false);
         Controls.SetActive(false);
+        var component = GetComponent<MeshRenderer>();
+        component.enabled = false;  
 
         if (movieRoutine != null)
             StopCoroutine(movieRoutine);
@@ -960,6 +962,7 @@ public class TrackMeshRenderer : MonoBehaviour
 {
     public Material trackMaterial;
     public List<Track> trackInstances;
+    public Slider time_slider;
 
     Mesh mesh;
 
@@ -980,7 +983,7 @@ public class TrackMeshRenderer : MonoBehaviour
         var mr = gameObject.AddComponent<MeshRenderer>();
 
         mf.sharedMesh = mesh;
-        mr.sharedMaterial = trackMaterial;
+        mr.sharedMaterial = new Material(Shader.Find("Sprites/Default"));
     }
 
     public void BuildMesh()
@@ -997,14 +1000,18 @@ public class TrackMeshRenderer : MonoBehaviour
         indices.Clear();
         timeToIndexCount.Clear();
 
-        foreach (var track in trackInstances)
+        var sortedTracks = trackInstances
+            .Where(t => t.times != null && t.times.Count > 0)
+            .OrderBy(t => t.times[0])
+            .ToList();
+
+        foreach (var track in sortedTracks)
         {
             if (track.positions == null || track.positions.Count < 2)
                 continue;
 
             int baseVertex = vertices.Count;
-
-            Color trackColor = track.colorByRGB ? track.color : GetColor(track.type);
+            Color trackColor = GetColor(track.type);
 
             for (int i = 0; i < track.positions.Count; i++)
             {
@@ -1025,6 +1032,15 @@ public class TrackMeshRenderer : MonoBehaviour
         mesh.SetColors(colors);
         mesh.SetIndices(indices, MeshTopology.Lines, 0);
         mesh.RecalculateBounds();
+    }
+
+
+    public void SliderSetup()
+    {
+        time_slider.maxValue = timeToIndexCount.Count - 1;
+        time_slider.minValue = 0;
+        time_slider.wholeNumbers = true;
+        time_slider.onValueChanged.AddListener((interactor) => SetTimeIndex((int) time_slider.value));
     }
 
     public void SetTimeIndex(int timeIndex)
