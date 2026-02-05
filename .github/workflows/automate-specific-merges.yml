@@ -1,4 +1,4 @@
-name: Auto-merge PRs from bjobilal
+name: Auto-merge PRs from specific user
 
 on:
   pull_request:
@@ -17,11 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     if: >
       github.event.pull_request.user.login == 'bjobilal' &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.repo.full_name == 'uclavr/G4VR'
     steps:
       - name: Enable auto-merge
         uses: peter-evans/enable-pull-request-automerge@v3
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.user-auto-merge }}
           pull-request-number: ${{ github.event.pull_request.number }}
           merge-method: squash
