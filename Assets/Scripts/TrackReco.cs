@@ -18,6 +18,8 @@ using UnityEngine.Experimental.GlobalIllumination;
 using System.Text.RegularExpressions;
 using JetBrains.Annotations;
 using XCharts.Runtime;
+using UnityEngine.SceneManagement;
+using static NewBehaviourScript;
 
 
 
@@ -36,6 +38,7 @@ public class NewBehaviourScript : MonoBehaviour
     [SerializeField] Material markerMat;
     
     public static List<Matrix4x4> markerMatrices = new List<Matrix4x4>();
+    bool drawMeshes = true;
 
     public static List<GameObject> tracks = new List<GameObject>();
     public static Dictionary<string, Dictionary<int, Track>> trackInfo = new Dictionary<string, Dictionary<int, Track>>(); // the int in the dictionary is the track id
@@ -46,6 +49,8 @@ public class NewBehaviourScript : MonoBehaviour
 
     //public Dictionary<string, List<Track>> trackOriginTimes = new Dictionary<string, List<Track>>(); // stores information about the tracks that appear at the string time
     SortedDictionary<double, List<Track>> trackOriginTimes;
+
+    List<Track> trackInstances = new List<Track>();
     //private Vector3 fixedStartPoint = new Vector3(0, -63.5f, -127f);
     public Slider time_controller;
 
@@ -97,6 +102,7 @@ public class NewBehaviourScript : MonoBehaviour
 
         trackInfo.Clear();
         tracks.Clear();
+        markerMatrices.Clear();
 
         time = GameObject.Find("Time");
         start_time = GameObject.Find("Start");
@@ -110,7 +116,7 @@ public class NewBehaviourScript : MonoBehaviour
         Controls = GameObject.Find("CPanel");
         Menus = GameObject.Find("MPanel");
 
-        //time_controller = GameObject.Find("TSlider").GetComponent<Slider>();
+        time_controller = GameObject.Find("TSlider").GetComponent<Slider>();
         //playButton = GameObject.Find("TPlay").GetComponent<Button>();
 
         Shader shader = Shader.Find("Standard");
@@ -125,22 +131,27 @@ public class NewBehaviourScript : MonoBehaviour
         ReadCSV(file, true);
         DrawTracks(1f);
 
-        // time slider settings
+        // time slider settings --> now offloaded to TrackMeshRenderer
 
-        time_controller.maxValue = sortedKeys.Count - 1;
-        time_controller.minValue = 0;
-        time_controller.value = sortedKeys.Count - 1;
-        time.transform.GetComponent<TextMeshProUGUI>().text = null;
+        //time_controller.maxValue = sortedKeys.Count - 1;
+        //time_controller.minValue = 0;
+        //time_controller.SetValueWithoutNotify(sortedKeys.Count - 1);
+        //time.transform.GetComponent<TextMeshProUGUI>().text = null;
+
+        //time_controller.onValueChanged.AddListener((interactor) => SteppedTracks(time_controller));
 
         // additional functions (if any)
 
         Format_Cuts(); // THIS HAS BEEN COMMENTED OUT JUST TO TEST THE G4VR VIS STUFF
                        //TrackAnalyser.Starter();
                        //SimTracks();
-
-        // The following is the command to spontaneously start the movies once the scene is created
-        // ONLY USE THIS FOR EDITOR DEBUGGING
-        //StartCoroutine(waiting());
+       
+        // only for custom scene since settings are not initialized in the inspector
+        if (SceneManager.GetActiveScene().name=="Custom")
+        {
+            UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Configuring settings for Custom scene");
+            configureSettings();
+        }
         
     }
 
@@ -159,26 +170,29 @@ public class NewBehaviourScript : MonoBehaviour
 
     void LateUpdate()
     {
-        for (int i = 0; i < markerMatrices.Count; i += 1023)
+        if (drawMeshes == true)
         {
-            int count = Mathf.Min(1023, markerMatrices.Count - i);
+            for (int i = 0; i < markerMatrices.Count; i += 1023)
+            {
+                int count = Mathf.Min(1023, markerMatrices.Count - i);
 
-            Graphics.DrawMeshInstanced(
-                markerMesh,
-                0,
-                markerMat,
-                markerMatrices.GetRange(i, count),
-                null,
-                UnityEngine.Rendering.ShadowCastingMode.Off,
-                false
-            );
+                Graphics.DrawMeshInstanced(
+                    markerMesh,
+                    0,
+                    markerMat,
+                    markerMatrices.GetRange(i, count),
+                    null,
+                    UnityEngine.Rendering.ShadowCastingMode.Off,
+                    false
+                );
+            }
         }
     }
 
     void ReadCSV(TextAsset file, bool dummy) 
     {
-        // As of 10/16/2025, the expected input format of the csv file is as follows:
-        // track/hit , ID, particle, charge, step, x, y, z, time of step, edep, process, px, py, pz, energy. 
+        // As of 2/2/2026, the expected input format of the csv file is as follows:
+        // track/hit , ID, particle, charge, step, x, y, z, time of step, edep, process, px, py, pz, energy, R, G, B  
         string[] lines = Regex.Split(file.text, "\r\n|\r|\n");
         bool headerSkipped = false;
         maxT = 0.0;
@@ -210,12 +224,17 @@ public class NewBehaviourScript : MonoBehaviour
                 if (!checkScale)
                 {
                     checkedScale = checkScaleFromPosition(poss.Max());
-                    GameObject Geometry = GameObject.Find("Scene");
-                    if (Geometry != null)
+                    GameObject[] geometries ={ GameObject.Find("Scene"),GameObject.Find("exampleB3a_scene"),GameObject.Find("exampleB4a_scene"), GameObject.Find("exampleB5_scene") };
+
+                    foreach (GameObject geo in geometries)
                     {
-                        Geometry.transform.localScale = new Vector3(checkedScale, checkedScale, checkedScale);
+                        if (geo != null)
+                        {
+                            geo.transform.localScale =
+                                Vector3.one * checkedScale;
+                        }
                     }
-                    //UnityEngine.Debug.Log("[NewBehaviourScript] From tracks, checkedScale set to " + checkedScale);
+
                     checkScale = true;
                 }
                 posX = -float.Parse(values[5])*checkedScale;
@@ -242,12 +261,13 @@ public class NewBehaviourScript : MonoBehaviour
 
                     colorByRGB = true;
                     trackColor = new Color(r, g, b);
-                    //UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Setting RGB values for track coloring");
+                    UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Setting RGB values for track coloring");
+                    throw new Exception("Manual Error");
                 }
                 catch
                 {
                     colorByRGB = false;
-                    //UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Setting type values for track coloring");
+                    UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Setting type values for track coloring");
                 }
                 string process = values[10];
 
@@ -286,6 +306,8 @@ public class NewBehaviourScript : MonoBehaviour
                 trackInfo[type][trackID].color = trackColor;
 
                 particles_in_scene.Add(pname);
+
+                trackInstances.Add(trackInfo[type][trackID]);
 
                 //Debug.Log("Track Info Count " + trackInfo.Count);
 
@@ -341,7 +363,7 @@ public class NewBehaviourScript : MonoBehaviour
 
         sortedKeys = time_control.Keys.OrderBy(key => key).ToList();
 
-        //Debug.Log($"Sorted Keys length: {sortedKeys.Count}");
+        Debug.Log($"Sorted Keys length: {sortedKeys.Count}");
 
         // time slider details
         stop_time.GetComponent<TextMeshProUGUI>().text = sortedKeys.Select(s => Convert.ToDouble(s)).Max().ToString();
@@ -350,6 +372,33 @@ public class NewBehaviourScript : MonoBehaviour
         status.transform.GetComponent<TextMeshProUGUI>().color = Color.green;
 
         AnalysisBoard.SetActive(false);
+
+
+        // initializing the unified mesh and the colliders
+
+        TrackMeshRenderer trackMeshRenderer = gameObject.AddComponent<TrackMeshRenderer>();
+        trackMeshRenderer.trackInstances = trackInstances;
+        trackMeshRenderer.time_slider = time_controller;
+        trackMeshRenderer.BuildMesh();
+
+        trackMeshRenderer.SliderSetup();
+
+        //trackMeshRenderer.SetTimeIndex(currentTimeIndex);
+
+    }
+
+    private void configureSettings()
+    {
+        GameObject cutsButton = GameObject.Find("CButton");
+        GameObject movieButton = GameObject.Find("MButton");
+        GameObject edepButton = GameObject.Find("Edep");
+        cutsButton.GetComponent<Button>().onClick.AddListener(ShowCutsBoard);
+        movieButton.GetComponent<Button>().onClick.AddListener(movie_init);
+
+        TrackAnalyser runningInstance = GetComponent<TrackAnalyser>(); 
+        edepButton.GetComponent<Button>().onClick.AddListener(() => runningInstance.ModeSwitch(edepButton));
+
+        //UnityEngine.Debug.Log(movieButton);
     }
 
     private float checkScaleFromPosition(float val)
@@ -419,6 +468,7 @@ public class NewBehaviourScript : MonoBehaviour
         }
     }
 
+    //[DEPRECATED]
     public async void SimTracks()
     {
 
@@ -492,8 +542,11 @@ public class NewBehaviourScript : MonoBehaviour
                 track.trackObj.SetActive(false);
         }
 
+        drawMeshes = false;
         Menus.SetActive(false);
         Controls.SetActive(false);
+        var component = GetComponent<MeshRenderer>();
+        component.enabled = false;  
 
         if (movieRoutine != null)
             StopCoroutine(movieRoutine);
@@ -514,6 +567,7 @@ public class NewBehaviourScript : MonoBehaviour
 
         Menus.SetActive(true);
         Controls.SetActive(true);
+        drawMeshes = true;
     }
 
     // --- Main playback controller ---
@@ -677,10 +731,13 @@ public class NewBehaviourScript : MonoBehaviour
 
     public void Format_Cuts()
     {
-       Transform content = CutsBoard.transform.GetChild(1).GetChild(0).GetChild(0);
-
+        Transform content = CutsBoard.transform.GetChild(1).GetChild(0).GetChild(0);
+        foreach (Transform child in content)
+            Destroy(child.gameObject);
+        
         foreach (string pname in particles_in_scene)
         {
+            //UnityEngine.Debug.Log("[FORMAT-CUTS] Adding cut option for "+ pname);
             GameObject temp = Instantiate(toggle_prefab);
             temp.GetComponentInChildren<UnityEngine.UI.Text>().text = pname;
             temp.GetComponent<Toggle>().isOn = true;
@@ -728,97 +785,49 @@ public class NewBehaviourScript : MonoBehaviour
         private LayerMask raycastLayerMask; // Set this to ensure only relevant objects are hit
 
 
-
-
         public void DrawTrack(Dictionary<string, List<GameObject>> list)
         {
+            if (positions == null || positions.Count < 2)
+                return;
 
+            if (times == null || times.Count == 0)
+                return;
 
-            //lineRenderer.positionCount = positions.Count;
-            //lineRenderer.SetPositions(positions.ToArray());
-            //lineRenderer.positionCount = 1;
-            //lineRenderer.SetPosition(0, positions[0]);
+            trackObj = new GameObject($"Track_{ID}");
 
-            //Debug.Log(positions[0]);
-            //Debug.Log($"Positions of {ID} are: {positions.Count}");
-
-            if (positions.Count < 2)
+            for (int i = 0; i < positions.Count - 1; i++)
             {
+                GameObject trackSegment = new GameObject($"{ID}_TrackSegment_{i + 1}");
+                trackSegment.transform.SetParent(trackObj.transform, false);
 
-                Debug.LogWarning($"Not enough points to animate the track {ID}.");
+                Vector3 start = positions[i];
+                Vector3 end = positions[i + 1];
+                Vector3 mid = (start + end) * 0.5f;
+
+                trackSegment.transform.position = mid;
+                trackSegment.transform.rotation = Quaternion.LookRotation(end - start);
+
+                float length = Vector3.Distance(start, end);
+
+                Rigidbody rb = trackSegment.AddComponent<Rigidbody>();
+                rb.isKinematic = true;
+
+                CapsuleCollider capsule = trackSegment.AddComponent<CapsuleCollider>();
+                capsule.direction = 2;
+                capsule.height = length + 0.05f;
+                capsule.radius = 0.025f;
+
+                XRSimpleInteractable interactable = trackSegment.AddComponent<XRSimpleInteractable>();
+                int temp = i;
+                interactable.selectEntered.AddListener(_ => onHit(temp));
+                interactable.hoverEntered.AddListener(_ => OnHoverEntered(temp));
+                interactable.hoverExited.AddListener(_ => OnHoverExited());
+
+                segments.Add(trackSegment);
+                list[Convert.ToString(times[i])].Add(trackSegment);
             }
-
-            else if (times == null || times.Count == 0)
-            {
-                Debug.LogError("Times list is empty or null!");
-            }
-            else
-            {
-
-                trackObj = new GameObject($"Track_{ID}_{positions.Count}_steps");
-                for (int i = 0; i < positions.Count - 1; i++)
-                {
-                    GameObject trackSegment = new GameObject($"{ID}_TrackSegment_{i+1}");
-                    GameObject lineSegment = new GameObject($"LineSegment_{i+1}");
-                    lineSegment.transform.parent = trackSegment.transform;
-                    trackSegment.transform.parent = trackObj.transform;
-
-                    Vector3 start = positions[i];
-                    Vector3 end = positions[i + 1];
-                    Vector3 midPoint = (start + end) / 2;
-                    Vector3 direction = (end - start).normalized;
-                    float length = Vector3.Distance(start, end);
-
-                    LineRenderer lineRenderer = lineSegment.AddComponent<LineRenderer>();
-                    lineRenderer.positionCount = 2;
-                    lineRenderer.SetPositions(new Vector3[] { start, end });
-                    lineRenderer.material = lineMaterial;
-                    lineRenderer.startWidth = 0.05f;// OG: 0.1f
-                    lineRenderer.endWidth = 0.05f; // OG: 0.1f
-                    lineRenderer.useWorldSpace = true;
-
-                    lineRenderer.sharedMaterial = lineMaterial;
-
-                    MaterialPropertyBlock mpb = new MaterialPropertyBlock();
-                    if (colorByRGB)
-                        mpb.SetColor("_Color", color);
-                    else
-                        mpb.SetColor("_Color", GetColor(type));
-
-                    lineRenderer.SetPropertyBlock(mpb);
-
-                    Rigidbody rigidbody = trackSegment.AddComponent<Rigidbody>();
-                    rigidbody.isKinematic = true;
-
-                    CapsuleCollider capsule = trackSegment.AddComponent<CapsuleCollider>();
-                    trackSegment.transform.position = midPoint;
-                    trackSegment.transform.LookAt(end);
-
-                    capsule.direction = 2;
-                    capsule.height = length + lineRenderer.startWidth;
-                    capsule.radius = lineRenderer.startWidth / 2;
-
-                    XRSimpleInteractable interactable = trackSegment.AddComponent<XRSimpleInteractable>();
-
-                    interactable.enabled = true;
-                    int temp = i;
-                    interactable.selectEntered.AddListener((interactor) => onHit(temp));
-                    interactable.hoverEntered.AddListener((interactor) => OnHoverEntered(temp));
-                    interactable.hoverExited.AddListener((interactor) => OnHoverExited());
-
-                    segments.Add(trackSegment);
-                    list[Convert.ToString(times[i])].Add(trackSegment);
-
-                    // MESHED MARKER BASED APPROACH FOR SCENE OPTIMIZATION 
-                    Vector3 localOffset =trackSegment.transform.InverseTransformPoint(positions[i]);
-                    Matrix4x4 localMarkerMatrix = Matrix4x4.TRS(localOffset,Quaternion.identity,Vector3.one * 0.05f);
-                    Matrix4x4 worldMarkerMatrix = trackSegment.transform.localToWorldMatrix * localMarkerMatrix;
-                    markerMatrices.Add(worldMarkerMatrix);
-                }
-
-            }
-
         }
+
 
         public void OnHoverExited()
         {
@@ -906,14 +915,14 @@ public class ParseHelper : MonoBehaviour
         ["h"] = 3600f * 1e12f  
     };
 
-    private static Dictionary<string, float> EUnits = new Dictionary<string, float>()
+    private static Dictionary<string, float> EUnits = new Dictionary<string, float>() // express all energy values in MeV
     {
-        ["meV"] = 1e9f,
-        ["eV"] = 1e6f,
-        ["keV"] = 1e3f,
+        ["meV"] = 1e-9f,
+        ["eV"] = 1e-6f,
+        ["keV"] = 1e-3f,
         ["MeV"] = 1f,
-        ["GeV"] = 1e-3f,
-        ["TeV"] = 1e-6f,
+        ["GeV"] = 1e3f,
+        ["TeV"] = 1e6f,
     };
 
     public static double ParseTime(string fullstr)
@@ -947,4 +956,129 @@ public class ParseHelper : MonoBehaviour
 
         return double.Parse(valueStr) * EUnits[unit];
     }
+}
+
+struct TimedSegment
+{
+    public double time;
+    public int indexA;
+    public int indexB;
+}
+
+
+public class TrackMeshRenderer : MonoBehaviour
+{
+    public Material trackMaterial;
+    public List<Track> trackInstances;
+    public Slider time_slider;
+
+    Mesh mesh;
+
+    readonly List<Vector3> vertices = new();
+    readonly List<Color> colors = new();
+    readonly List<int> indices = new();
+
+    readonly List<int> timeToIndexCount = new();
+
+    void Awake()
+    {
+        mesh = new Mesh
+        {
+            indexFormat = UnityEngine.Rendering.IndexFormat.UInt32
+        };
+
+        var mf = gameObject.AddComponent<MeshFilter>();
+        var mr = gameObject.AddComponent<MeshRenderer>();
+
+        mf.sharedMesh = mesh;
+        mr.sharedMaterial = new Material(Shader.Find("Sprites/Default"));
+    }
+
+    public void BuildMesh()
+    {
+        if (mesh == null)
+        {
+            Debug.LogWarning("Mesh is null — creating a new one.");
+            mesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+            GetComponent<MeshFilter>().sharedMesh = mesh;
+        }
+
+        vertices.Clear();
+        colors.Clear();
+        indices.Clear();
+        timeToIndexCount.Clear();
+
+        var segments = new List<TimedSegment>();
+
+        foreach (var track in trackInstances)
+        {
+            if (track.positions == null || track.positions.Count < 2)
+                continue;
+
+            int baseVertex = vertices.Count;
+            Color trackColor = GetColor(track.type);
+
+            for (int i = 0; i < track.positions.Count; i++)
+            {
+                vertices.Add(track.positions[i]);
+                colors.Add(trackColor);
+            }
+
+            for (int i = 0; i < track.positions.Count - 1; i++)
+            {
+                segments.Add(new TimedSegment
+                {
+                    time = track.times[i + 1], // segment appears when the next point appears
+                    indexA = baseVertex + i,
+                    indexB = baseVertex + i + 1
+                });
+            }
+        }
+        
+        segments.Sort((a, b) => a.time.CompareTo(b.time));
+
+        foreach (var seg in segments)
+        {
+            indices.Add(seg.indexA);
+            indices.Add(seg.indexB);
+
+            // how many indices should be visible up util THIS time
+            timeToIndexCount.Add(indices.Count);
+        }
+
+        mesh.Clear();
+        mesh.SetVertices(vertices);
+        mesh.SetColors(colors);
+        mesh.SetIndices(indices, MeshTopology.Lines, 0);
+        mesh.RecalculateBounds();
+    }
+
+
+    public void SliderSetup()
+    {
+        time_slider.maxValue = timeToIndexCount.Count - 1;
+        time_slider.minValue = 0;
+        time_slider.wholeNumbers = true;
+        time_slider.onValueChanged.AddListener((interactor) => SetTimeIndex((int) time_slider.value));
+    }
+
+    public void SetTimeIndex(int timeIndex)
+    {
+        if (timeToIndexCount.Count == 0)
+            return;
+
+        int indexCount = timeToIndexCount[
+            Mathf.Clamp(timeIndex, 0, timeToIndexCount.Count - 1)
+        ];
+
+        mesh.SetIndices(
+            indices,
+            0,
+            indexCount,
+            MeshTopology.Lines,
+            0
+        );
+    }
+
+
 }

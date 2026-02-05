@@ -206,7 +206,7 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 1373545542}
+      - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: NewBehaviourScript, Assembly-CSharp
         m_MethodName: Close
         m_Mode: 2
@@ -993,7 +993,7 @@ MonoBehaviour:
   m_StopLineAtFirstRaycastHit: 1
   m_StopLineAtSelection: 0
   m_SnapEndpointIfAvailable: 0
-  m_LineBendRatio: 0.5
+  m_LineBendRatio: 1
   m_OverrideInteractorLineOrigin: 1
   m_LineOriginTransform: {fileID: 0}
   m_LineOriginOffset: 0
@@ -2634,7 +2634,7 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 1373545542}
+      - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: NewBehaviourScript, Assembly-CSharp
         m_MethodName: movie_init
         m_Mode: 1
@@ -2645,7 +2645,7 @@ MonoBehaviour:
           m_FloatArgument: 0
           m_StringArgument: 
           m_BoolArgument: 0
-        m_CallState: 2
+        m_CallState: 1
 --- !u!114 &379411482
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -5484,7 +5484,7 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 1373545542}
+      - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: NewBehaviourScript, Assembly-CSharp
         m_MethodName: Close
         m_Mode: 2
@@ -5837,7 +5837,7 @@ GameObject:
   - component: {fileID: 697879442}
   - component: {fileID: 697879441}
   m_Layer: 5
-  m_Name: Button (2)
+  m_Name: CButton
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -5907,7 +5907,7 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 1373545542}
+      - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: NewBehaviourScript, Assembly-CSharp
         m_MethodName: ShowCutsBoard
         m_Mode: 1
@@ -5918,7 +5918,7 @@ MonoBehaviour:
           m_FloatArgument: 0
           m_StringArgument: 
           m_BoolArgument: 0
-        m_CallState: 2
+        m_CallState: 1
 --- !u!114 &697879442
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -9603,28 +9603,6 @@ RectTransform:
   m_AnchoredPosition: {x: 0, y: 0}
   m_SizeDelta: {x: 580, y: 300}
   m_Pivot: {x: 0.5, y: 0.5}
---- !u!114 &1373545542 stripped
-MonoBehaviour:
-  m_CorrespondingSourceObject: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-  m_PrefabInstance: {fileID: 1643204479945231697}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 0}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 12c6fb0e6a7e3ab418d10e5bc0bd09c0, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
---- !u!114 &1373545544 stripped
-MonoBehaviour:
-  m_CorrespondingSourceObject: {fileID: 3513349629785368905, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-  m_PrefabInstance: {fileID: 1643204479945231697}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 0}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 2d0489bb1417f864986a94fe71ffac6a, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
 --- !u!1 &1380352871
 GameObject:
   m_ObjectHideFlags: 1
@@ -12235,7 +12213,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &1600308820
 RectTransform:
   m_ObjectHideFlags: 0
@@ -12300,7 +12278,7 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 1373545542}
+      - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: NewBehaviourScript, Assembly-CSharp
         m_MethodName: SimTracks
         m_Mode: 1
@@ -12787,7 +12765,7 @@ MonoBehaviour:
   m_StopLineAtFirstRaycastHit: 1
   m_StopLineAtSelection: 0
   m_SnapEndpointIfAvailable: 0
-  m_LineBendRatio: 0.5
+  m_LineBendRatio: 1
   m_OverrideInteractorLineOrigin: 1
   m_LineOriginTransform: {fileID: 0}
   m_LineOriginOffset: 0
@@ -13875,7 +13853,9 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_text: Cuts
+  m_text: 'Filter Tracks
+
+'
   m_isRightToLeft: 0
   m_fontAsset: {fileID: 11400000, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
   m_sharedMaterial: {fileID: 2180264, guid: 8f586378b4e144a9851e7b34d9b748ee, type: 2}
@@ -14234,7 +14214,7 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 1373545544}
+      - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: TrackAnalyser, Assembly-CSharp
         m_MethodName: ModeSwitch
         m_Mode: 2
@@ -14825,7 +14805,7 @@ GameObject:
   - component: {fileID: 1874002639}
   - component: {fileID: 1874002638}
   m_Layer: 5
-  m_Name: TSlider
+  m_Name: Time
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -17364,7 +17344,7 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 1373545542}
+      - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: NewBehaviourScript, Assembly-CSharp
         m_MethodName: Close
         m_Mode: 2
@@ -17490,7 +17470,7 @@ GameObject:
   - component: {fileID: 2146586872}
   - component: {fileID: 2146586871}
   m_Layer: 5
-  m_Name: Slider
+  m_Name: TSlider
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -17547,7 +17527,7 @@ MonoBehaviour:
   m_OnValueChanged:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 1373545542}
+      - m_Target: {fileID: 0}
         m_TargetAssemblyTypeName: NewBehaviourScript, Assembly-CSharp
         m_MethodName: SteppedTracks
         m_Mode: 2
@@ -17715,151 +17695,6 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 2147345952}
   m_CullTransparentMesh: 1
---- !u!1001 &1643204479945231697
-PrefabInstance:
-  m_ObjectHideFlags: 0
-  serializedVersion: 2
-  m_Modification:
-    serializedVersion: 3
-    m_TransformParent: {fileID: 0}
-    m_Modifications:
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: file
-      value: 
-      objectReference: {fileID: 4900000, guid: d2a17a66517b0e2408828808437be58a, type: 3}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: time
-      value: 
-      objectReference: {fileID: 1874002636}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: Menus
-      value: 
-      objectReference: {fileID: 59248749}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: scale
-      value: 1
-      objectReference: {fileID: 0}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: status
-      value: 
-      objectReference: {fileID: 587576176}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: Controls
-      value: 
-      objectReference: {fileID: 525467867}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: CutsBoard
-      value: 
-      objectReference: {fileID: 2083446519}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: EdepBoard
-      value: 
-      objectReference: {fileID: 1606204014}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: geo_scale
-      value: 1
-      objectReference: {fileID: 0}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: markerMat
-      value: 
-      objectReference: {fileID: 2100000, guid: 407ee8af1993f4c449e3689d906c5e92, type: 2}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: stop_time
-      value: 
-      objectReference: {fileID: 2011916556}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: markerMesh
-      value: 
-      objectReference: {fileID: 10210, guid: 0000000000000000e000000000000000, type: 0}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: playButton
-      value: 
-      objectReference: {fileID: 1600308821}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: start_time
-      value: 
-      objectReference: {fileID: 760188077}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: AnalysisBoard
-      value: 
-      objectReference: {fileID: 1755959060}
-    - target: {fileID: 1447593663082105759, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: time_controller
-      value: 
-      objectReference: {fileID: 2146586871}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalPosition.x
-      value: 50
-      objectReference: {fileID: 0}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalPosition.y
-      value: 50
-      objectReference: {fileID: 0}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalPosition.z
-      value: 50
-      objectReference: {fileID: 0}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalRotation.w
-      value: 1
-      objectReference: {fileID: 0}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalRotation.x
-      value: 0
-      objectReference: {fileID: 0}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalRotation.y
-      value: 0
-      objectReference: {fileID: 0}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalRotation.z
-      value: 0
-      objectReference: {fileID: 0}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalEulerAnglesHint.x
-      value: 0
-      objectReference: {fileID: 0}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalEulerAnglesHint.y
-      value: 0
-      objectReference: {fileID: 0}
-    - target: {fileID: 2407273992558184008, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_LocalEulerAnglesHint.z
-      value: 0
-      objectReference: {fileID: 0}
-    - target: {fileID: 3513349629785368905, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: CutsBoard
-      value: 
-      objectReference: {fileID: 2083446519}
-    - target: {fileID: 3513349629785368905, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: EdepBoard
-      value: 
-      objectReference: {fileID: 37266653}
-    - target: {fileID: 3513349629785368905, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: time_board
-      value: 
-      objectReference: {fileID: 83455802}
-    - target: {fileID: 3513349629785368905, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: movie_button
-      value: 
-      objectReference: {fileID: 379411479}
-    - target: {fileID: 3513349629785368905, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: SceneSwitchButton
-      value: 
-      objectReference: {fileID: 1762425314}
-    - target: {fileID: 3738153531651381246, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_Name
-      value: track_renderer
-      objectReference: {fileID: 0}
-    - target: {fileID: 3738153531651381246, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
-      propertyPath: m_IsActive
-      value: 0
-      objectReference: {fileID: 0}
-    m_RemovedComponents: []
-    m_RemovedGameObjects: []
-    m_AddedGameObjects: []
-    m_AddedComponents: []
-  m_SourcePrefab: {fileID: 100100000, guid: f9f5bf90917cf374f8509b035a7287f8, type: 3}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
@@ -17870,7 +17705,6 @@ SceneRoots:
   - {fileID: 33334016}
   - {fileID: 1093698454}
   - {fileID: 180397243}
-  - {fileID: 1643204479945231697}
   - {fileID: 267208401}
   - {fileID: 300567262}
   - {fileID: 890024747}

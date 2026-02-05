@@ -209,14 +209,14 @@ public class TrackAnalyser : MonoBehaviour
                         {
                             geo.Value.Add(currTrack.edeps[i]);
                             totaledep += currTrack.edeps[i];
-                            Debug.Log($"{tempCollider.gameObject.name} has edep: {currTrack.edeps[i]} from {segmentCollider.gameObject.name} and step {i}");
+                            //Debug.Log($"{tempCollider.gameObject.name} has edep: {currTrack.edeps[i]} from {segmentCollider.gameObject.name} and step {i}");
                         }
 
                     }
                 }
             }
 
-            Debug.Log($"{temp.name} has total edep: {totaledep}");
+            //Debug.Log($"{temp.name} has total edep: {totaledep}");
         }
 
     }
@@ -233,27 +233,7 @@ public class TrackAnalyser : MonoBehaviour
         List<double> edeps = edep_bypiece[obj];
         double total = edep_bypiece[obj].Sum();
 
-        /* -- Charting Logic -- does not look good --
-        BarChart chart = edep_logging.transform.GetChild(1).GetComponent<BarChart>();
-        if (chart == null)
-        {
-            Debug.LogWarning("BarChart component not found!");
-            return;
-        }
-
-        // Try to find "Serie0" field
-        chart.RemoveAllSerie();
-
-        chart.AddSerie<Bar>();
-
-        for (int i = 0; i < edeps.Count; i++)
-        {
-            chart.AddXAxisData($"{edeps[i]}");
-            chart.AddData(0, Mathf.Log10(edeps.Count(x => x == edeps[i])));
-            //chart.AddData(0, edeps.Count(x => x == edeps[i]));
-        }*/ 
-
-        edep_logging.transform.GetChild(0).GetComponent<TextMeshProUGUI>().text = "Edep: "+total.ToString("0.0000000E+0") + " eV"; // looks very empty, but what more can one do ??
+        edep_logging.transform.GetChild(0).GetComponent<TextMeshProUGUI>().text = "Edep: "+total.ToString("0.0000000E+0") + " MeV"; 
 
         
 
@@ -291,7 +271,7 @@ public class TrackAnalyser : MonoBehaviour
 
             if (totaledep <= 0)
             {
-                // No deposition → faint white
+                // No deposition == faint white
                 targetColor = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
             }
             else if (totaledep < edepThreshold)
@@ -343,9 +323,9 @@ public class TrackAnalyser : MonoBehaviour
         if (color_board != null)
         {
             color_board.transform.GetChild(0).gameObject.SetActive(true);
-            color_board.transform.GetChild(0).GetChild(0).GetComponent<TMPro.TextMeshProUGUI>().text = maxEdep.ToString("0.000E+0") + " eV";
-            color_board.transform.GetChild(0).GetChild(1).GetComponent<TMPro.TextMeshProUGUI>().text = ((maxEdep + minEdep) / 2).ToString("0.000E+0") + " eV";
-            color_board.transform.GetChild(0).GetChild(2).GetComponent<TMPro.TextMeshProUGUI>().text = minEdep.ToString("0.000E+0") + " eV";
+            color_board.transform.GetChild(0).GetChild(0).GetComponent<TMPro.TextMeshProUGUI>().text = maxEdep.ToString("0.000E+0") + " MeV";
+            color_board.transform.GetChild(0).GetChild(1).GetComponent<TMPro.TextMeshProUGUI>().text = ((maxEdep + minEdep) / 2).ToString("0.000E+0") + " MeV";
+            color_board.transform.GetChild(0).GetChild(2).GetComponent<TMPro.TextMeshProUGUI>().text = minEdep.ToString("0.000E+0") + " MeV";
         }
     }
 
@@ -355,21 +335,17 @@ public class TrackAnalyser : MonoBehaviour
         {
             // --- Switching TO Edep scene ---
 
-            // Clear any previously stored original materials
             originalMaterials.Clear();
 
-            // 0) Prepare objects for coloring: store original and set faint white
             foreach (var geo in edep_bypiece)
             {
                 GameObject obj = geo.Key;
                 Renderer rend = obj.GetComponent<Renderer>();
                 if (rend != null)
                 {
-                    // Store original material
                     if (!originalMaterials.ContainsKey(obj))
                         originalMaterials[obj] = rend.material;
 
-                    // Replace with Standard shader material, faint white
                     Material mat = new Material(Shader.Find("Standard"));
                     mat.color = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
                     mat.color = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
@@ -385,10 +361,8 @@ public class TrackAnalyser : MonoBehaviour
                 }
             }
 
-            // Update Scene button label
             SceneSwitchButton.transform.GetComponentInChildren<TMPro.TextMeshProUGUI>().text = "Tracks";
 
-            // Disable line segment colliders
             foreach (var typeEntry in trackInfo)
             {
                 foreach (var track in typeEntry.Value)
@@ -401,7 +375,6 @@ public class TrackAnalyser : MonoBehaviour
                 }
             }
 
-            // Hide UI elements
             if (carousel != null) carousel.SetActive(false);
             time_board.SetActive(false);
             movie_button.SetActive(false);
@@ -411,6 +384,8 @@ public class TrackAnalyser : MonoBehaviour
             // --- Switching BACK from Edep scene ---
 
             // Update Scene button label
+            SceneSwitchButton = GameObject.Find("Edep");
+            //UnityEngine.Debug.Log("[TRACK-ANALYSER] Scene Switch Button is set to "+SceneSwitchButton);
             SceneSwitchButton.transform.GetComponentInChildren<TMPro.TextMeshProUGUI>().text = "Edep";
 
             // Enable line segment colliders
