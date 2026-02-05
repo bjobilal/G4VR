@@ -958,6 +958,14 @@ public class ParseHelper : MonoBehaviour
     }
 }
 
+struct TimedSegment
+{
+    public double time;
+    public int indexA;
+    public int indexB;
+}
+
+
 public class TrackMeshRenderer : MonoBehaviour
 {
     public Material trackMaterial;
@@ -1000,12 +1008,9 @@ public class TrackMeshRenderer : MonoBehaviour
         indices.Clear();
         timeToIndexCount.Clear();
 
-        var sortedTracks = trackInstances
-            .Where(t => t.times != null && t.times.Count > 0)
-            .OrderBy(t => t.times[0])
-            .ToList();
+        var segments = new List<TimedSegment>();
 
-        foreach (var track in sortedTracks)
+        foreach (var track in trackInstances)
         {
             if (track.positions == null || track.positions.Count < 2)
                 continue;
@@ -1021,10 +1026,24 @@ public class TrackMeshRenderer : MonoBehaviour
 
             for (int i = 0; i < track.positions.Count - 1; i++)
             {
-                indices.Add(baseVertex + i);
-                indices.Add(baseVertex + i + 1);
-                timeToIndexCount.Add(indices.Count);
+                segments.Add(new TimedSegment
+                {
+                    time = track.times[i + 1], // segment appears when the next point appears
+                    indexA = baseVertex + i,
+                    indexB = baseVertex + i + 1
+                });
             }
+        }
+        
+        segments.Sort((a, b) => a.time.CompareTo(b.time));
+
+        foreach (var seg in segments)
+        {
+            indices.Add(seg.indexA);
+            indices.Add(seg.indexB);
+
+            // how many indices should be visible up util THIS time
+            timeToIndexCount.Add(indices.Count);
         }
 
         mesh.Clear();
