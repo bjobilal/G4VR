@@ -261,6 +261,7 @@ public class ServerGET : MonoBehaviour
     {
         loadingScreen.SetActive(true);
         urlScreen.SetActive(false);
+        SetSpheresOff();
 
         //loadingSpinner.SetActive(true);
         loadingBar.value = 0;
@@ -316,7 +317,7 @@ public class ServerGET : MonoBehaviour
             statusText.text = "Model loaded.";
             loadStatus = true;
             //Geometry.SetActive(false);
-
+            
             await Task.Delay(2000);
             
         }
@@ -334,6 +335,14 @@ public class ServerGET : MonoBehaviour
     private void Update()
     {
         if (!errorScreen.activeSelf && !loadingScreen.activeSelf && !urlScreen.activeSelf && !MainObj1.activeSelf) { urlScreen.SetActive(true); }
+    }
+
+    private void SetSpheresOff()
+    {
+        GameObject obj1 = GameObject.Find("Sphere_1");
+        GameObject obj2 = GameObject.Find("Sphere_2");
+        obj1.SetActive(false);
+        obj2.SetActive(false);
     }
 }
 

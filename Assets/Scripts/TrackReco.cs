@@ -52,6 +52,7 @@ public class NewBehaviourScript : MonoBehaviour
 
     List<Track> trackInstances = new List<Track>();
     //private Vector3 fixedStartPoint = new Vector3(0, -63.5f, -127f);
+
     public Slider time_controller;
 
     public GameObject time;
@@ -744,23 +745,15 @@ public class NewBehaviourScript : MonoBehaviour
             temp.GetComponent<Toggle>().onValueChanged.AddListener((interactor) => Manage_Cuts(pname, temp.GetComponent<Toggle>().isOn));
 
             temp.transform.SetParent(content, false);
+            
         }
     }
     
     private void Manage_Cuts(string pname, bool active)
     {
-        foreach (var typeEntry in trackInfo) 
-        {
-            var tracksByType = typeEntry.Value;
-            foreach (var track in tracksByType)
-            {
-                if (track.Value.particleName == pname && !active)
-                    track.Value.trackObj.SetActive(false);
-                else if (track.Value.particleName == pname && active)
-                    track.Value.trackObj.SetActive(true);
+        var mesh = GetComponent<TrackMeshRenderer>();
+        mesh.ApplyCuts(pname, active);
             }
-        }
-    }
 
     public class Track 
     {
@@ -963,7 +956,9 @@ struct TimedSegment
     public double time;
     public int indexA;
     public int indexB;
+    public Track track; 
 }
+
 
 
 public class TrackMeshRenderer : MonoBehaviour
@@ -977,8 +972,11 @@ public class TrackMeshRenderer : MonoBehaviour
     readonly List<Vector3> vertices = new();
     readonly List<Color> colors = new();
     readonly List<int> indices = new();
-
+    readonly List<TimedSegment> allSegments = new();
     readonly List<int> timeToIndexCount = new();
+
+    readonly Dictionary<string, bool> cutStates = new Dictionary<string, bool>(); // tracks the visibility of given string names
+
 
     void Awake()
     {
@@ -996,19 +994,11 @@ public class TrackMeshRenderer : MonoBehaviour
 
     public void BuildMesh()
     {
-        if (mesh == null)
-        {
-            Debug.LogWarning("Mesh is null — creating a new one.");
-            mesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
-            GetComponent<MeshFilter>().sharedMesh = mesh;
-        }
-
         vertices.Clear();
         colors.Clear();
         indices.Clear();
         timeToIndexCount.Clear();
-
-        var segments = new List<TimedSegment>();
+        allSegments.Clear();
 
         foreach (var track in trackInstances)
         {
@@ -1026,32 +1016,32 @@ public class TrackMeshRenderer : MonoBehaviour
 
             for (int i = 0; i < track.positions.Count - 1; i++)
             {
-                segments.Add(new TimedSegment
+                allSegments.Add(new TimedSegment
                 {
-                    time = track.times[i + 1], // segment appears when the next point appears
+                    time = track.times[i + 1],
                     indexA = baseVertex + i,
-                    indexB = baseVertex + i + 1
+                    indexB = baseVertex + i + 1,
+                    track = track
                 });
             }
         }
-        
-        segments.Sort((a, b) => a.time.CompareTo(b.time));
 
-        foreach (var seg in segments)
-        {
-            indices.Add(seg.indexA);
-            indices.Add(seg.indexB);
-
-            // how many indices should be visible up util THIS time
-            timeToIndexCount.Add(indices.Count);
-        }
+        allSegments.Sort((a, b) => a.time.CompareTo(b.time));
 
         mesh.Clear();
         mesh.SetVertices(vertices);
         mesh.SetColors(colors);
-        mesh.SetIndices(indices, MeshTopology.Lines, 0);
         mesh.RecalculateBounds();
+
+        foreach (var track in trackInstances)
+        {
+            if (!cutStates.ContainsKey(track.particleName))
+                cutStates[track.particleName] = true;
+        }
+
+        ApplyCuts();
     }
+
 
 
     public void SliderSetup()
@@ -1078,6 +1068,35 @@ public class TrackMeshRenderer : MonoBehaviour
             MeshTopology.Lines,
             0
         );
+    }
+
+    public void ApplyCuts(string pname=null, bool active=true)
+    {
+        if (pname != null)
+            cutStates[pname] = active;
+
+        RebuildIndices();
+    }
+
+    void RebuildIndices()
+    {
+        indices.Clear();
+        timeToIndexCount.Clear();
+
+        foreach (var seg in allSegments)
+        {
+            if (cutStates.TryGetValue(seg.track.particleName, out bool visible)
+                && !visible)
+            {
+                continue;
+            }
+
+            indices.Add(seg.indexA);
+            indices.Add(seg.indexB);
+            timeToIndexCount.Add(indices.Count);
+        }
+
+        mesh.SetIndices(indices, MeshTopology.Lines, 0);
     }
 
 

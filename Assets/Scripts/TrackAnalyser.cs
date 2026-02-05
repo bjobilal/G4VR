@@ -233,9 +233,9 @@ public class TrackAnalyser : MonoBehaviour
         List<double> edeps = edep_bypiece[obj];
         double total = edep_bypiece[obj].Sum();
 
-        edep_logging.transform.GetChild(0).GetComponent<TextMeshProUGUI>().text = "Edep: "+total.ToString("0.0000000E+0") + " MeV"; 
+        edep_logging.transform.GetChild(0).GetComponent<TextMeshProUGUI>().text = "Edep: "+total.ToString("0.0000000E+0") + " MeV";
 
-        
+        edep_logging.transform.GetChild(1).GetComponent<TextMeshProUGUI>().text = "Geometry: " + obj.name;
 
     }
 

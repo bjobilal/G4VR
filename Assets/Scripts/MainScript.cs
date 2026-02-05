@@ -44,21 +44,6 @@ public class MainScript : MonoBehaviour
     }
     void Start()
     {
-        /*if (Application.isEditor) 
-        experimentButton.SetActive(false);
-
-        {
-            if (UnityEngine.Android.Permission.HasUserAuthorizedPermission(UnityEngine.Android.Permission.ExternalStorageRead) && UnityEngine.Android.Permission.HasUserAuthorizedPermission(UnityEngine.Android.Permission.ExternalStorageWrite))
-            {
-                //UnityEngine.Debug.Log("Permissions already granted");
-                DEBUG.text = "permissions granted";
-            }
-            else
-            {
-                UnityEngine.Android.Permission.RequestUserPermission(UnityEngine.Android.Permission.ExternalStorageRead);
-                UnityEngine.Android.Permission.RequestUserPermission(UnityEngine.Android.Permission.ExternalStorageWrite);
-            }
-        }*/
     }
 
     // Update is called once per frame
@@ -69,10 +54,6 @@ public class MainScript : MonoBehaviour
 
     public void LoadScene(string name)
     {
-        /*NewBehaviourScript.trackInfo = null;
-        NewBehaviourScript.tracks = null;
-        TrackAnalyser.trackInfo = null;
-        TrackAnalyser.edep_bypiece = null;*/
         SceneManager.LoadScene(name);
     }
 
