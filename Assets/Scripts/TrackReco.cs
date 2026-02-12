@@ -118,6 +118,7 @@ public class NewBehaviourScript : MonoBehaviour
         trackInfo.Clear();
         tracks.Clear();
         markerMatrices.Clear();
+        colliders.Clear();
 
         //time = GameObject.Find("Time");
         start_time = GameObject.Find("Start");
@@ -314,6 +315,7 @@ public class NewBehaviourScript : MonoBehaviour
                     trackInfo[type][trackID] = new Track(); 
                     trackInfo[type][trackID].ID = trackID;
                     //Debug.Log("HELLO: initialized track");
+                    trackInstances.Add(trackInfo[type][trackID]);
                 }
                 trackInfo[type][trackID].positions.Add(position);
                 trackInfo[type][trackID].energies.Add(energy);
@@ -329,9 +331,6 @@ public class NewBehaviourScript : MonoBehaviour
                 trackInfo[type][trackID].color = trackColor;
 
                 particles_in_scene.Add(pname);
-
-                trackInstances.Add(trackInfo[type][trackID]);
-
                 //Debug.Log("Track Info Count " + trackInfo.Count);
 
             }
