@@ -36,6 +36,7 @@ public class NewBehaviourScript : MonoBehaviour
     [SerializeField] public static Material lineMaterial ;
     [SerializeField] Mesh markerMesh;
     [SerializeField] Material markerMat;
+    [SerializeField] public Transform player; 
     
     public static List<Matrix4x4> markerMatrices = new List<Matrix4x4>();
     bool drawMeshes = true;
@@ -49,6 +50,19 @@ public class NewBehaviourScript : MonoBehaviour
 
     //public Dictionary<string, List<Track>> trackOriginTimes = new Dictionary<string, List<Track>>(); // stores information about the tracks that appear at the string time
     SortedDictionary<double, List<Track>> trackOriginTimes;
+    public static List<ColliderEntry> colliders = new List<ColliderEntry>();
+
+    // SETTINGS AND STATES TO MANAGE COLLIDERS
+
+    public int maxActive = 1000;
+    public float recomputeInterval = 5f;
+    public float activateRadius = 2.0f;
+    public float releaseRadius = 2.5f; 
+
+
+    private HashSet<int> activeSet = new HashSet<int>();
+    private HashSet<int> nextActiveSet = new HashSet<int>();
+    private float timer;
 
     List<Track> trackInstances = new List<Track>();
     //private Vector3 fixedStartPoint = new Vector3(0, -63.5f, -127f);
@@ -104,8 +118,9 @@ public class NewBehaviourScript : MonoBehaviour
         trackInfo.Clear();
         tracks.Clear();
         markerMatrices.Clear();
+        colliders.Clear();
 
-        time = GameObject.Find("Time");
+        //time = GameObject.Find("Time");
         start_time = GameObject.Find("Start");
         stop_time = GameObject.Find("Stop");
         status = GameObject.Find("Status");
@@ -116,6 +131,8 @@ public class NewBehaviourScript : MonoBehaviour
         EdepBoard = GameObject.Find("Edep Board").transform.GetChild(0).gameObject;
         Controls = GameObject.Find("CPanel");
         Menus = GameObject.Find("MPanel");
+
+        player = GameObject.Find("Main Camera").transform;
 
         time_controller = GameObject.Find("TSlider").GetComponent<Slider>();
         //playButton = GameObject.Find("TPlay").GetComponent<Button>();
@@ -166,7 +183,14 @@ public class NewBehaviourScript : MonoBehaviour
             //UnityEngine.Debug.Log("[NewBehaviourScript] set scene scale to "+checkedScale);
         }
         //else 
-            //UnityEngine.Debug.Log("[NewBehaviourScript] Could not find Scene");
+        //UnityEngine.Debug.Log("[NewBehaviourScript] Could not find Scene");
+
+        timer += Time.deltaTime;
+        if (timer >= recomputeInterval)
+        {
+            timer = 0f;
+            Recompute();
+        }
     }
 
     void LateUpdate()
@@ -254,6 +278,7 @@ public class NewBehaviourScript : MonoBehaviour
                 // COLORING 
                 bool colorByRGB = false;
                 Color trackColor = new Color();
+                string type = values[3];// type == charge. it is used to color tracks by GEANT4 convention; alternatively, coloured if RGB specified.
                 try
                 {
                     float r = float.Parse(values[15]);
@@ -267,6 +292,7 @@ public class NewBehaviourScript : MonoBehaviour
                 catch
                 {
                     colorByRGB = false;
+                    trackColor = GetColor(type);
                     UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Setting type values for track coloring");
                 }
                 string process = values[10];
@@ -275,8 +301,6 @@ public class NewBehaviourScript : MonoBehaviour
 
                 if (time < minT) { minT = time; }
                 if (time > maxT) { maxT = time; }
-
-                string type = values[3];// type == charge. it is used to color tracks by GEANT4 convention; alternatively, coloured if RGB specified.
 
                 Vector3 position = new Vector3(posX, posY, posZ);
 
@@ -291,6 +315,7 @@ public class NewBehaviourScript : MonoBehaviour
                     trackInfo[type][trackID] = new Track(); 
                     trackInfo[type][trackID].ID = trackID;
                     //Debug.Log("HELLO: initialized track");
+                    trackInstances.Add(trackInfo[type][trackID]);
                 }
                 trackInfo[type][trackID].positions.Add(position);
                 trackInfo[type][trackID].energies.Add(energy);
@@ -306,9 +331,6 @@ public class NewBehaviourScript : MonoBehaviour
                 trackInfo[type][trackID].color = trackColor;
 
                 particles_in_scene.Add(pname);
-
-                trackInstances.Add(trackInfo[type][trackID]);
-
                 //Debug.Log("Track Info Count " + trackInfo.Count);
 
             }
@@ -386,6 +408,71 @@ public class NewBehaviourScript : MonoBehaviour
         //trackMeshRenderer.SetTimeIndex(currentTimeIndex);
 
     }
+
+
+    // COLLIDER STUFF
+    public struct ColliderEntry
+    {
+        public int id;
+        public Vector3 start;
+        public Vector3 end;
+        public GameObject obj;    // reference to actual collider
+    }
+
+    void Recompute()
+    {
+        Vector3 camPos = player.position;
+
+        float activateR2 = activateRadius * activateRadius;
+        float releaseR2 = releaseRadius * releaseRadius;
+
+        nextActiveSet.Clear();
+
+        foreach (int idx in activeSet)
+        {
+            var seg = colliders[idx];
+
+            float d2 = SqrDistancePointToSegment(
+                camPos,
+                seg.start,
+                seg.end
+            );
+
+            if (d2 <= releaseR2)
+            {
+                nextActiveSet.Add(idx);
+            }
+            else
+            {
+                seg.obj.SetActive(false);
+            }
+        }
+
+        for (int i = 0; i < colliders.Count && nextActiveSet.Count < maxActive; i++)
+        {
+            if (nextActiveSet.Contains(i))
+                continue;
+
+            var seg = colliders[i];
+
+            float d2 = SqrDistancePointToSegment(
+                camPos,
+                seg.start,
+                seg.end
+            );
+
+            if (d2 <= activateR2)
+            {
+                seg.obj.SetActive(true);
+                nextActiveSet.Add(i);
+            }
+        }
+
+        var temp = activeSet;
+        activeSet = nextActiveSet;
+        nextActiveSet = temp;
+    }
+
 
     private void configureSettings()
     {
@@ -756,6 +843,17 @@ public class NewBehaviourScript : MonoBehaviour
         mesh.ApplyCuts(pname, active);
             }
 
+    static float SqrDistancePointToSegment(Vector3 p, Vector3 a, Vector3 b)
+    {
+        Vector3 ab = b - a;
+        float t = Vector3.Dot(p - a, ab) / Vector3.Dot(ab, ab);
+
+        t = Mathf.Clamp01(t);
+
+        Vector3 closest = a + t * ab;
+        return (p - closest).sqrMagnitude;
+    }
+
     public class Track 
     {
         public int ID;
@@ -816,6 +914,16 @@ public class NewBehaviourScript : MonoBehaviour
                 interactable.selectEntered.AddListener(_ => onHit(temp));
                 interactable.hoverEntered.AddListener(_ => OnHoverEntered(temp));
                 interactable.hoverExited.AddListener(_ => OnHoverExited());
+
+                // fill in collider struct
+                ColliderEntry entry = new ColliderEntry();
+                entry.id = colliders.Count;
+                entry.start = positions[i];
+                entry.end = positions[i + 1];
+                entry.obj = trackSegment;
+                colliders.Add(entry);
+
+                trackSegment.SetActive(false);
 
                 segments.Add(trackSegment);
                 list[Convert.ToString(times[i])].Add(trackSegment);
