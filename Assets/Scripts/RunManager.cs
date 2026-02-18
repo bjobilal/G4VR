@@ -1,5 +1,6 @@
-using GLTFast;
+﻿using GLTFast;
 using System;
+using System.IO;
 using System.Collections;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -69,11 +70,11 @@ public class RunManager : MonoBehaviour
         GameObject gManager = GameObject.Find("GameManager");
         if (gManager) 
         {
-            TextAsset newRun = await PullRun(gManager.transform.GetComponent<GameManager>().URL);
+            string newRun = await PullRun(gManager.transform.GetComponent<GameManager>().URL);
             //TextAsset newRun = await PullRun(); // debugging with default address
-            if (newRun)
+            if (newRun != null)
             {
-                track_renderer_Prefab.transform.GetComponent<NewBehaviourScript>().file = newRun;
+                track_renderer_Prefab.transform.GetComponent<NewBehaviourScript>().customFile = newRun;
                 runInstance = Instantiate(track_renderer_Prefab);
                 runInstance.transform.GetComponent<NewBehaviourScript>().enabled = true;
                 runInstance.transform.GetComponent<TrackAnalyser>().enabled = true;
@@ -85,35 +86,36 @@ public class RunManager : MonoBehaviour
         
     }
 
-    private async Task<TextAsset> PullRun(string parentURL = @"http://192.168.0.214:2535/files/testuser/")
+    private async Task<string> PullRun(string parentURL = @"http://192.168.0.214:2535/files/testuser/")
     {
-        string url = parentURL + "run" + run + ".csv"; 
+        //string url = parentURL + "run" + run + ".csv";
+        //string savePath = Path.Combine(Application.persistentDataPath, $"run{run}.csv");
+
+        // for binary
+        string url = parentURL + "run" + run + ".bin";
+        string savePath = Path.Combine(Application.persistentDataPath, $"run{run}.bin");
 
         using (UnityWebRequest www = UnityWebRequest.Get(url))
         {
-            Debug.Log("[RunManager] Requesting at URL: "+url);
-            www.downloadHandler = new DownloadHandlerBuffer();
-            var result = www.SendWebRequest();
-            while (!result.isDone)
+            Debug.Log("[RunManager] Requesting at URL: " + url);
+
+            www.downloadHandler = new DownloadHandlerFile(savePath);
+
+            var operation = www.SendWebRequest();
+            while (!operation.isDone)
                 await Task.Yield();
 
             if (www.result != UnityWebRequest.Result.Success)
             {
-                Debug.LogError(www.result+"; "+www.error);
-                Debug.LogError("URL Error: There was an error loading data from this address. Please check that it is reachable and try again.");
+                Debug.LogError(www.error);
                 return null;
             }
 
-            byte[] data = www.downloadHandler.data;
-            Debug.Log($"Downloaded {data.Length} bytes");
-
-            string csvText = www.downloadHandler.text;
-            TextAsset csv = new TextAsset(csvText);
-
-            //ParseText(csv); // debugging tool
-            return csv;
+            Debug.Log("Download complete to disk.");
+            return savePath;
         }
     }
+
 
     public async Task<int> getRunCount(string parentURL)
     {
