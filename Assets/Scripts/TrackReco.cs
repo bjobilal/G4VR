@@ -20,6 +20,7 @@ using JetBrains.Annotations;
 using XCharts.Runtime;
 using UnityEngine.SceneManagement;
 using static NewBehaviourScript;
+using static GLTFast.Schema.AnimationChannelBase;
 
 
 
@@ -40,6 +41,8 @@ public class NewBehaviourScript : MonoBehaviour
     
     public static List<Matrix4x4> markerMatrices = new List<Matrix4x4>();
     bool drawMeshes = true;
+
+    List<string> stringTable = new List<string>(); // LUT for binary
 
     public static List<GameObject> tracks = new List<GameObject>();
     public static Dictionary<string, Dictionary<int, Track>> trackInfo = new Dictionary<string, Dictionary<int, Track>>(); // the int in the dictionary is the track id
@@ -96,10 +99,19 @@ public class NewBehaviourScript : MonoBehaviour
     private bool playbool = false;
 
     public TextAsset file;
+    public string customFile;
 
     public bool checkScale = false;
     public float checkedScale = 1f;
     public bool appliedScaleToGeometry = false;
+
+    // warning in case CSV could not be fully read or understood:
+    bool csvWarning = false;
+
+    string GetString(ushort id)
+    {
+        return (id < stringTable.Count) ? stringTable[id] : "";
+    }
 
     IEnumerator waiting()
     {
@@ -139,24 +151,24 @@ public class NewBehaviourScript : MonoBehaviour
 
         Shader shader = Shader.Find("Standard");
         string fileName = @$"C:\Users\uclav\Documents\B's Sandbox\G4VR\Assets\{name}\{name}_tracks.csv";
-        string filePath = Path.Combine(UnityEngine.Application.streamingAssetsPath, fileName);
+        string filePath = System.IO.Path.Combine(UnityEngine.Application.streamingAssetsPath, fileName);
         lineMaterial = GameObject.Find("line_mat").GetComponent<Renderer>().material;
         lineMaterial.shader = shader;
         lineMaterial.EnableKeyword("_EMISSION");
 
         // read csv and draw tracks
+        if (SceneManager.GetActiveScene().name == "Custom" || file == null)
+        { 
+            ReadBIN(customFile, true);
+            if (File.Exists(customFile))
+                File.Delete(customFile);
 
-        ReadCSV(file, true);
+        }
+        else
+            ReadCSV(file, true);
+
         DrawTracks(1f);
 
-        // time slider settings --> now offloaded to TrackMeshRenderer
-
-        //time_controller.maxValue = sortedKeys.Count - 1;
-        //time_controller.minValue = 0;
-        //time_controller.SetValueWithoutNotify(sortedKeys.Count - 1);
-        //time.transform.GetComponent<TextMeshProUGUI>().text = null;
-
-        //time_controller.onValueChanged.AddListener((interactor) => SteppedTracks(time_controller));
 
         // additional functions (if any)
 
@@ -213,6 +225,236 @@ public class NewBehaviourScript : MonoBehaviour
             }
         }
     }
+    string ReadCString(BinaryReader reader)
+    {
+        ushort len = reader.ReadUInt16();
+        byte[] bytes = reader.ReadBytes(len);
+        return System.Text.Encoding.UTF8.GetString(bytes);
+    }
+
+    void ReadBIN(string file, bool dummy)
+    {
+        using (BinaryReader reader = new BinaryReader(File.Open(file, FileMode.Open)))
+        {
+            byte[] magicBytes = reader.ReadBytes(4);
+            string magic = System.Text.Encoding.ASCII.GetString(magicBytes);
+            uint version = reader.ReadUInt32();
+            uint stringCount = reader.ReadUInt32();
+            uint trackCount = reader.ReadUInt32();
+
+            Debug.Log($"Magic={magic} version={version} strings={stringCount} tracks={trackCount}");
+
+            for (int t = 0; t < trackCount; t++)
+            {
+                int trackID = reader.ReadInt32();
+                ushort nameID = reader.ReadUInt16();
+                double charge = reader.ReadDouble();
+
+                float r = reader.ReadSingle();
+                float g = reader.ReadSingle();
+                float b = reader.ReadSingle();
+
+                uint n = reader.ReadUInt32();
+
+                float[] x = new float[n];
+                float[] y = new float[n];
+                float[] z = new float[n];
+                float[] time = new float[n];
+                float[] edep = new float[n];
+                float[] px = new float[n];
+                float[] py = new float[n];
+                float[] pz = new float[n];
+                float[] energy = new float[n];
+                ushort[] processID = new ushort[n];
+
+                for (int i = 0; i < n; i++) x[i] = reader.ReadSingle();
+                for (int i = 0; i < n; i++) y[i] = reader.ReadSingle();
+                for (int i = 0; i < n; i++) z[i] = reader.ReadSingle();
+
+                for (int i = 0; i < n; i++) time[i] = reader.ReadSingle();
+                for (int i = 0; i < n; i++) edep[i] = reader.ReadSingle();
+
+                for (int i = 0; i < n; i++) px[i] = reader.ReadSingle();
+                for (int i = 0; i < n; i++) py[i] = reader.ReadSingle();
+                for (int i = 0; i < n; i++) pz[i] = reader.ReadSingle();
+                for (int i = 0; i < n; i++) energy[i] = reader.ReadSingle();
+
+                for (int i = 0; i < n; i++) processID[i] = reader.ReadUInt16();
+
+                string pname = null;
+                string type = charge.ToString();
+
+                bool colorByRGB = !(r == 0f && g == 0f && b == 0f);
+
+                Color trackColor;
+                if (colorByRGB)
+                {
+                    trackColor = new Color(r * 255f, g * 255f, b * 255f);
+                }
+                else
+                {
+                    trackColor = GetColor(type);
+                }
+
+                if (!trackInfo.ContainsKey(type))
+                {
+                    trackInfo[type] = new Dictionary<int, Track>();
+                }
+
+                if (!trackInfo[type].ContainsKey(trackID))
+                {
+                    trackInfo[type][trackID] = new Track();
+                    trackInfo[type][trackID].ID = trackID;
+                    trackInstances.Add(trackInfo[type][trackID]);
+                }
+
+                Track tr = trackInfo[type][trackID];
+
+                tr.type = type;
+                tr.particleName = pname;
+                tr.particleNameID = nameID;
+                tr.colorByRGB = colorByRGB;
+                tr.color = trackColor;
+
+                for (int i = 0; i < n; i++)
+                {
+                    float posX = -x[i];
+                    float posY = y[i];
+                    float posZ = z[i];
+
+                    List<float> poss = new List<float>() { Mathf.Abs(posX), Mathf.Abs(posY), Mathf.Abs(posZ)};
+
+                    if (!checkScale)
+                    {
+                        checkedScale = checkScaleFromPosition(poss.Max());
+                        GameObject[] geometries = { GameObject.Find("Scene"), GameObject.Find("exampleB3a_scene"), GameObject.Find("exampleB4a_scene"), GameObject.Find("exampleB5_scene") };
+                        foreach (GameObject geo in geometries)
+                        {
+                            if (geo != null)
+                                geo.transform.localScale = Vector3.one * checkedScale;
+                        }
+
+                        checkScale = true;
+                    }
+
+                    posX *= checkedScale;
+                    posY *= checkedScale;
+                    posZ *= checkedScale;
+
+                    Vector3 position = new Vector3(posX, posY, posZ);
+
+                    double tracktime = time[i];
+                    double e = energy[i];
+                    double d = edep[i];
+
+                    if (tracktime < minT) minT = tracktime;
+                    if (tracktime > maxT) maxT = tracktime;
+
+                    tr.positions.Add(position);
+                    tr.energies.Add(e);
+                    tr.times.Add(tracktime);
+                    tr.processIDs.Add(processID[i]);
+                    tr.px.Add(px[i]);
+                    tr.py.Add(py[i]);
+                    tr.pz.Add(pz[i]);
+                    tr.edeps.Add(d);
+                }
+
+                particles_in_scene.Add(pname);
+
+            }
+
+            List<string> stringTable = new List<string>();
+
+            for (int s = 0; s < stringCount; s++)
+            {
+                ushort len = reader.ReadUInt16();
+                byte[] bytes = reader.ReadBytes(len);
+                stringTable.Add(System.Text.Encoding.UTF8.GetString(bytes));
+            }
+
+            foreach (var typeDict in trackInfo.Values)
+            {
+                foreach (Track tr in typeDict.Values)
+                {
+                    tr.particleName = stringTable[tr.particleNameID];
+
+                    foreach (ushort id in tr.processIDs)
+                        tr.processes.Add(stringTable[id]);
+                }
+            }
+
+            Debug.Log("Finished reading BIN file.");
+        }
+
+        int F = 30;
+        var trackOriginTimesRaw = new SortedDictionary<double, List<Track>>();
+
+        foreach (var typeEntry in trackInfo)
+        {
+            foreach (var kv in typeEntry.Value)
+            {
+                var tval = kv.Value;
+                double t0 = tval.times[0]; // first step of this track
+                if (!trackOriginTimesRaw.ContainsKey(t0))
+                    trackOriginTimesRaw[t0] = new List<Track>();
+                trackOriginTimesRaw[t0].Add(tval);
+
+                foreach (var ti in tval.times)
+                {
+                    if (!time_control.ContainsKey(ti.ToString()))
+                        time_control[ti.ToString()] = new List<GameObject>();
+                }
+
+                tracks.Add(tval.trackObj); // keep list of all track GameObjects
+            }
+        }
+        //foreach (var typeEntry in trackInfo) { var tracksByType = typeEntry.Value; foreach (var track in tracksByType) { var tval = track.Value; if (tval == null) { //Debug.LogError($"track.Value IS NULL for key {track.Key} in type {typeEntry.Key}"); continue; } //Debug.Log($"Adding track: ID={tval.ID}, times0={tval.times?[0] ?? double.NaN}, obj={tval.trackObj}, hash={tval.GetHashCode()}"); tracks.Add(tval.trackObj); string originKey = Convert.ToString(tval.times[0]); if (!trackOriginTimes.ContainsKey(originKey)) trackOriginTimes.Add(originKey, new List<Track> { tval }); else trackOriginTimes[originKey].Add(tval); for (int i = 0; i < tval.times.Count; i++) { double ti = tval.times[i]; if (!time_control.ContainsKey(Convert.ToString(ti))) time_control.Add(Convert.ToString(ti), new List<GameObject>()); } //Debug.Log($"time of {tval.ID} is {tval.times[0]}"); } }
+
+
+        // Step 2: scale all times into movie seconds
+        trackOriginTimes = new SortedDictionary<double, List<Track>>();
+
+        foreach (var kv in trackOriginTimesRaw)
+        {
+            double rawTime = kv.Key;
+            double scaledTime = F * ((rawTime - minT) / (maxT - minT)); // 0..F seconds
+            trackOriginTimes[scaledTime] = kv.Value;
+        }
+
+        // Now trackOriginTimes.Keys are numeric floats/doubles, no collisions
+        Debug.Log($"[TRACK ORIGINS] Scaled range: {trackOriginTimes.First().Key:F3}s → {trackOriginTimes.Last().Key:F3}s");
+
+
+
+
+
+        sortedKeys = time_control.Keys.OrderBy(key => key).ToList();
+
+        Debug.Log($"Sorted Keys length: {sortedKeys.Count}");
+
+        // time slider details
+        stop_time.GetComponent<TextMeshProUGUI>().text = sortedKeys.Select(s => Convert.ToDouble(s)).Max().ToString();
+        start_time.GetComponent<TextMeshProUGUI>().text = sortedKeys.Select(s => Convert.ToDouble(s)).Min().ToString();
+        status.transform.GetComponent<TextMeshProUGUI>().text = "Complete";
+        status.transform.GetComponent<TextMeshProUGUI>().color = Color.green;
+
+        AnalysisBoard.SetActive(false);
+
+
+        // initializing the unified mesh and the colliders
+
+        TrackMeshRenderer trackMeshRenderer = gameObject.AddComponent<TrackMeshRenderer>();
+        trackMeshRenderer.trackInstances = trackInstances;
+        trackMeshRenderer.time_slider = time_controller;
+        trackMeshRenderer.BuildMesh();
+
+        trackMeshRenderer.SliderSetup();
+
+        //trackMeshRenderer.SetTimeIndex(currentTimeIndex);
+
+    }
+
 
     void ReadCSV(TextAsset file, bool dummy) 
     {
@@ -234,105 +476,113 @@ public class NewBehaviourScript : MonoBehaviour
                 headerSkipped = true;
                 continue;
             }
-           
-            string[] values = line.Split(',');
-
-            if (values[0]=="track") // process tracks; TODO: logic to process hits (future work)
+            try
             {
-                //Debug.Log("Parsing CSV");
-                int trackID = int.Parse(values[1]);
-                float posX, posY, posZ;
-                posX = -float.Parse(values[5]);
-                posY = float.Parse(values[6]);
-                posZ = float.Parse(values[7]);
-                List<float> poss = new List<float>() { Math.Abs(posX), Math.Abs(posY), Math.Abs(posZ) };
-                if (!checkScale)
-                {
-                    checkedScale = checkScaleFromPosition(poss.Max());
-                    GameObject[] geometries ={ GameObject.Find("Scene"),GameObject.Find("exampleB3a_scene"),GameObject.Find("exampleB4a_scene"), GameObject.Find("exampleB5_scene") };
+                string[] values = line.Split(',');
 
-                    foreach (GameObject geo in geometries)
+                if (values[0] == "track") // process tracks; TODO: logic to process hits (future work)
+                {
+                    //Debug.Log("Parsing CSV");
+                    int trackID = int.Parse(values[1]);
+                    float posX, posY, posZ;
+                    posX = -float.Parse(values[5]);
+                    posY = float.Parse(values[6]);
+                    posZ = float.Parse(values[7]);
+                    List<float> poss = new List<float>() { Math.Abs(posX), Math.Abs(posY), Math.Abs(posZ) };
+                    if (!checkScale)
                     {
-                        if (geo != null)
+                        checkedScale = checkScaleFromPosition(poss.Max());
+                        GameObject[] geometries = { GameObject.Find("Scene"), GameObject.Find("exampleB3a_scene"), GameObject.Find("exampleB4a_scene"), GameObject.Find("exampleB5_scene") };
+
+                        foreach (GameObject geo in geometries)
                         {
-                            geo.transform.localScale =
-                                Vector3.one * checkedScale;
+                            if (geo != null)
+                            {
+                                geo.transform.localScale =
+                                    Vector3.one * checkedScale;
+                            }
                         }
+
+                        checkScale = true;
+                    }
+                    posX = -float.Parse(values[5]) * checkedScale;
+                    posY = float.Parse(values[6]) * checkedScale;
+                    posZ = float.Parse(values[7]) * checkedScale;
+
+                    double energy = ParseHelper.ParseEnergy(values[14]);
+                    double time = ParseHelper.ParseTime(values[8]);
+                    string pname = values[2];
+
+                    double px = float.Parse(values[11]);
+
+                    double py = float.Parse(values[12]);
+                    double pz = float.Parse(values[13]);
+
+                    // COLORING 
+                    bool colorByRGB = false;
+                    Color trackColor = new Color();
+                    string type = values[3];// type == charge. it is used to color tracks by GEANT4 convention; alternatively, coloured if RGB specified.
+                    try
+                    {
+                        float r = float.Parse(values[15]);
+                        float g = float.Parse(values[16]);
+                        float b = float.Parse(values[17]);
+
+                        colorByRGB = true;
+                        trackColor = new Color(r * 255f, g * 255f, b * 255f);
+                        UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Setting RGB values for track coloring");
+                    }
+                    catch
+                    {
+                        colorByRGB = false;
+                        trackColor = GetColor(type);
+                        UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Setting type values for track coloring");
+                    }
+                    string process = values[10];
+
+                    double edep = ParseHelper.ParseEnergy(values[9]);
+
+                    if (time < minT) { minT = time; }
+                    if (time > maxT) { maxT = time; }
+
+                    Vector3 position = new Vector3(posX, posY, posZ);
+
+                    if (!trackInfo.ContainsKey(type))
+                    {
+                        trackInfo[type] = new Dictionary<int, Track>();
+                        //Debug.Log("HELLO: added type to dictionary");
                     }
 
-                    checkScale = true;
+                    if (!trackInfo[type].ContainsKey(trackID))
+                    {
+                        trackInfo[type][trackID] = new Track();
+                        trackInfo[type][trackID].ID = trackID;
+                        //Debug.Log("HELLO: initialized track");
+                        trackInstances.Add(trackInfo[type][trackID]);
+                    }
+                    trackInfo[type][trackID].positions.Add(position);
+                    trackInfo[type][trackID].energies.Add(energy);
+                    trackInfo[type][trackID].times.Add(time);
+                    trackInfo[type][trackID].type = type;
+                    trackInfo[type][trackID].particleName = pname;
+                    trackInfo[type][trackID].processes.Add(process);
+                    trackInfo[type][trackID].px.Add(px);
+                    trackInfo[type][trackID].py.Add(py);
+                    trackInfo[type][trackID].pz.Add(pz);
+                    trackInfo[type][trackID].edeps.Add(edep);
+                    trackInfo[type][trackID].colorByRGB = colorByRGB;
+                    trackInfo[type][trackID].color = trackColor;
+
+                    particles_in_scene.Add(pname);
+                    //Debug.Log("Track Info Count " + trackInfo.Count);
+
                 }
-                posX = -float.Parse(values[5])*checkedScale;
-                posY = float.Parse(values[6])*checkedScale;
-                posZ = float.Parse(values[7])*checkedScale;
-
-                double energy = ParseHelper.ParseEnergy(values[14]);
-                double time = ParseHelper.ParseTime(values[8]);
-                string pname = values[2];
-
-                double px = float.Parse(values[11]);
-
-                double py = float.Parse(values[12]);
-                double pz = float.Parse(values[13]);
-
-                // COLORING 
-                bool colorByRGB = false;
-                Color trackColor = new Color();
-                string type = values[3];// type == charge. it is used to color tracks by GEANT4 convention; alternatively, coloured if RGB specified.
-                try
-                {
-                    float r = float.Parse(values[15]);
-                    float g = float.Parse(values[16]);
-                    float b = float.Parse(values[17]);
-
-                    colorByRGB = true;
-                    trackColor = new Color(r*255f, g*255f, b*255f);
-                    UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Setting RGB values for track coloring");
-                }
-                catch
-                {
-                    colorByRGB = false;
-                    trackColor = GetColor(type);
-                    UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Setting type values for track coloring");
-                }
-                string process = values[10];
-
-                double edep = ParseHelper.ParseEnergy(values[9]);
-
-                if (time < minT) { minT = time; }
-                if (time > maxT) { maxT = time; }
-
-                Vector3 position = new Vector3(posX, posY, posZ);
-
-                if (!trackInfo.ContainsKey(type))
-                {
-                    trackInfo[type] = new Dictionary<int, Track>();
-                    //Debug.Log("HELLO: added type to dictionary");
-                }
-
-                if (!trackInfo[type].ContainsKey(trackID))
-                {
-                    trackInfo[type][trackID] = new Track(); 
-                    trackInfo[type][trackID].ID = trackID;
-                    //Debug.Log("HELLO: initialized track");
-                    trackInstances.Add(trackInfo[type][trackID]);
-                }
-                trackInfo[type][trackID].positions.Add(position);
-                trackInfo[type][trackID].energies.Add(energy);
-                trackInfo[type][trackID].times.Add(time); 
-                trackInfo[type][trackID].type = type;
-                trackInfo[type][trackID].particleName = pname;
-                trackInfo[type][trackID].processes.Add(process);
-                trackInfo[type][trackID].px.Add(px);
-                trackInfo[type][trackID].py.Add(py);
-                trackInfo[type][trackID].pz.Add(pz);
-                trackInfo[type][trackID].edeps.Add(edep);
-                trackInfo[type][trackID].colorByRGB = colorByRGB;
-                trackInfo[type][trackID].color = trackColor;
-
-                particles_in_scene.Add(pname);
-                //Debug.Log("Track Info Count " + trackInfo.Count);
-
+            }
+            catch (Exception e)
+            {
+                csvWarning = true;
+                UnityEngine.Debug.LogError("[READ-CSV] Errro in parsing track; skipping... (" + e.Message + ")");
+                continue;
             }
         }
 
@@ -875,6 +1125,11 @@ public class NewBehaviourScript : MonoBehaviour
         public GameObject trackObj; // parent gameobejct of each track
         public List<GameObject> segments = new List<GameObject>(); // segments of the track 
         private LayerMask raycastLayerMask; // Set this to ensure only relevant objects are hit
+
+        // only for binary/custom scene. 
+
+        public List<ushort> processIDs = new List<ushort>();
+        public ushort particleNameID;
 
 
         public void DrawTrack(Dictionary<string, List<GameObject>> list)
