@@ -27,6 +27,8 @@ public class TrackAnalyser : MonoBehaviour
 
     public static Transform DebugBoardTextTransform;
 
+    public NewBehaviourScript NBS_instance;
+
     //private static bool on_analysis; // if on_analysis is true -> you show edeps. if on_analysis is false -> you go back to tracks
 
 
@@ -87,6 +89,7 @@ public class TrackAnalyser : MonoBehaviour
     public void Awake()
     {
         //on_analysis = true;
+        NBS_instance = gameObject.transform.GetComponent<NewBehaviourScript>();
     }
     public void Starter()
     {
@@ -103,12 +106,10 @@ public class TrackAnalyser : MonoBehaviour
         if (geometry == null)
             geometry = GameObject.Find("G4Scene");
         EdepBoard.transform.GetChild(0).gameObject.SetActive( false );
+        AddGeometries();
         SceneSwitch(true);
-        if (true){
-            AddGeometries();
-            LogEdep();
-            Coloring();
-        }
+        LogEdep();
+        Coloring();
 
         // next time you call this button, 
         //on_analysis = !on_analysis;
@@ -148,9 +149,11 @@ public class TrackAnalyser : MonoBehaviour
     public static void LogEdep()
     {
         //DebugBoardTextTransform.GetComponent<TextMeshProUGUI>().text += "Entered LogEdep \n "; // DEBUG ONLY
+
         Physics.SyncTransforms();
         foreach (var geo in edep_bypiece)
         {
+            geo.Value.Clear();   // ADD THIS
             GameObject temp = geo.Key;
             Collider tempCollider = null;
             try { tempCollider = temp.GetComponent<MeshCollider>(); }
@@ -163,10 +166,12 @@ public class TrackAnalyser : MonoBehaviour
 
             try
             {
-                XRSimpleInteractable interactable = temp.AddComponent<XRSimpleInteractable>();
-
-                interactable.enabled = true;
-                interactable.selectEntered.AddListener((interactor) => onHit(temp));
+                XRSimpleInteractable interactable = temp.GetComponent<XRSimpleInteractable>();
+                if (interactable == null)
+                {
+                    interactable = temp.AddComponent<XRSimpleInteractable>();
+                    interactable.selectEntered.AddListener((interactor) => onHit(temp));
+                }
             }
             catch { }
             double totaledep = 0;
@@ -180,26 +185,21 @@ public class TrackAnalyser : MonoBehaviour
                     for (int i = 0; i<currTrack.segments.Count; i++)
                     {
                         GameObject segmentObject = currTrack.segments[i];
-                        Collider segmentCollider = segmentObject.GetComponent<Collider>();
-                        //DebugBoardTextTransform.GetComponent<TextMeshProUGUI>().text += "NO ISSUES \n "; // DEBUG ONLY
+                        if (!segmentObject.activeSelf)
+                        {
+                            segmentObject.SetActive(true);
+                        }
+                        Collider segmentCollider = segmentObject.GetComponent<CapsuleCollider>();
+                        if (segmentCollider == null)
+                        {
+                            Debug.LogError($"No CapsuleCollider on {segmentObject.name}");
+                            continue;
+                        }                       
                         if (!tempCollider.enabled)
                             tempCollider.enabled = true;
                         if (!segmentCollider.enabled)
                             segmentCollider.enabled = true;
-                        //Physics.SyncTransforms();
-                        //Coroutine coroutine = StartCoroutine(DelayedBoundsCheck());
 
-                        //tempCollider.gameObject.SetActive(true);
-                        //MeshCollider mc = tempCollider as MeshCollider;
-                        //var mesh = mc.sharedMesh;
-
-
-                        /*if (segmentCollider.bounds.Intersects(tempCollider.bounds)) // this code used to be fine until i realized that the bounds checking is too coarse and is AABB. physics may be better - BJ
-                        {
-                            geo.Value.Add(currTrack.edeps[i]); // add the edep to the edep list associated with temp
-                            totaledep += currTrack.edeps[i];
-                            Debug.Log($"{tempCollider.gameObject.name} has edep: {currTrack.edeps[i]} from {segmentCollider.gameObject.name} and step {i}");
-                        }*/
                         bool isOverlapping = Physics.ComputePenetration(
                                 segmentCollider, segmentCollider.transform.position, segmentCollider.transform.rotation,
                                 tempCollider, tempCollider.transform.position, tempCollider.transform.rotation,
@@ -211,7 +211,6 @@ public class TrackAnalyser : MonoBehaviour
                             totaledep += currTrack.edeps[i];
                             //Debug.Log($"{tempCollider.gameObject.name} has edep: {currTrack.edeps[i]} from {segmentCollider.gameObject.name} and step {i}");
                         }
-
                     }
                 }
             }
@@ -337,6 +336,10 @@ public class TrackAnalyser : MonoBehaviour
 
             originalMaterials.Clear();
 
+            // deactivate NN algorithm for as long as in EDEP mode
+
+            NBS_instance.overriden = true;
+
             foreach (var geo in edep_bypiece)
             {
                 GameObject obj = geo.Key;
@@ -382,6 +385,10 @@ public class TrackAnalyser : MonoBehaviour
         else
         {
             // --- Switching BACK from Edep scene ---
+
+            // reactivate NN algorithm
+
+            NBS_instance.overriden = false;
 
             // Update Scene button label
             SceneSwitchButton = GameObject.Find("EButton");
