@@ -82,7 +82,7 @@ public class NumberCarousel : MonoBehaviour
     {
         OVRInput.Update();
 
-        float leftTrigger = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.LTouch);
+        float leftTrigger = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch);
 
         if (Time.time - lastInputTime > inputCooldown)
         {
@@ -98,7 +98,7 @@ public class NumberCarousel : MonoBehaviour
         if (OVRInput.GetDown(OVRInput.Button.Three)) PreviousNumber(); // X button
         */
         if (OVRInput.GetDown(OVRInput.Button.PrimaryThumbstick)) LoadRuns();
-        if (OVRInput.Get(OVRInput.Button.PrimaryThumbstick, OVRInput.Controller.LTouch))
+        if (OVRInput.Get(OVRInput.Button.PrimaryThumbstick, OVRInput.Controller.RTouch))
         {
             LoadRuns();
             Debug.Log("[CAROUSEL] Requesting new run load");

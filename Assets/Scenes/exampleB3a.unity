@@ -728,6 +728,7 @@ GameObject:
   - component: {fileID: 122961557}
   - component: {fileID: 122961556}
   - component: {fileID: 122961560}
+  - component: {fileID: 122961561}
   m_Layer: 0
   m_Name: test_parser/Manager
   m_TagString: Untagged
@@ -828,6 +829,19 @@ MonoBehaviour:
   Keyboard: {fileID: 0}
   DEBUG: {fileID: 0}
   skyboxMaterials: []
+--- !u!114 &122961561
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 122961555}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ebfc1535a4fe5554f8da7f8127489656, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  logInterval: 1
 --- !u!1 &158410840
 GameObject:
   m_ObjectHideFlags: 0
@@ -9516,7 +9530,12 @@ MonoBehaviour:
   step_time: 0
   markerMesh: {fileID: 10210, guid: 0000000000000000e000000000000000, type: 0}
   markerMat: {fileID: 2100000, guid: 407ee8af1993f4c449e3689d906c5e92, type: 2}
+  player: {fileID: 0}
   time_scale: 0
+  maxActive: 1000
+  recomputeInterval: 5
+  activateRadius: 2
+  releaseRadius: 2.5
   time_controller: {fileID: 1592889714}
   time: {fileID: 1083580790}
   start_time: {fileID: 306071632}
@@ -9534,6 +9553,7 @@ MonoBehaviour:
   minT: 0
   playButton: {fileID: 1966424357}
   file: {fileID: 4900000, guid: 103fef78647a6d34892e08b7a5bcd732, type: 3}
+  customFile: 
   checkScale: 0
   checkedScale: 1
   appliedScaleToGeometry: 0
@@ -17937,5 +17957,5 @@ SceneRoots:
   - {fileID: 122961559}
   - {fileID: 1202069381}
   - {fileID: 1862152204}
-  - {fileID: 1409997276}
   - {fileID: 1351591988}
+  - {fileID: 1409997276}

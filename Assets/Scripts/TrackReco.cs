@@ -60,7 +60,8 @@ public class NewBehaviourScript : MonoBehaviour
     public int maxActive = 1000;
     public float recomputeInterval = 5f;
     public float activateRadius = 2.0f;
-    public float releaseRadius = 2.5f; 
+    public float releaseRadius = 2.5f;
+    public bool overriden = false;
 
 
     private HashSet<int> activeSet = new HashSet<int>();
@@ -201,7 +202,7 @@ public class NewBehaviourScript : MonoBehaviour
         if (timer >= recomputeInterval)
         {
             timer = 0f;
-            Recompute();
+            Recompute(overriden);
         }
     }
 
@@ -289,10 +290,12 @@ public class NewBehaviourScript : MonoBehaviour
                 Color trackColor;
                 if (colorByRGB)
                 {
+                    UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] (Binary) Setting track color by RGB");
                     trackColor = new Color(r * 255f, g * 255f, b * 255f);
                 }
                 else
                 {
+                    UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] (Binary) Setting track color by type");
                     trackColor = GetColor(type);
                 }
 
@@ -340,12 +343,12 @@ public class NewBehaviourScript : MonoBehaviour
                     posX *= checkedScale;
                     posY *= checkedScale;
                     posZ *= checkedScale;
-
                     Vector3 position = new Vector3(posX, posY, posZ);
 
                     double tracktime = time[i];
                     double e = energy[i];
                     double d = edep[i];
+                    //UnityEngine.Debug.Log("EDEP value:"+ d);
 
                     if (tracktime < minT) minT = tracktime;
                     if (tracktime > maxT) maxT = tracktime;
@@ -359,9 +362,6 @@ public class NewBehaviourScript : MonoBehaviour
                     tr.pz.Add(pz[i]);
                     tr.edeps.Add(d);
                 }
-
-                particles_in_scene.Add(pname);
-
             }
 
             List<string> stringTable = new List<string>();
@@ -378,7 +378,7 @@ public class NewBehaviourScript : MonoBehaviour
                 foreach (Track tr in typeDict.Values)
                 {
                     tr.particleName = stringTable[tr.particleNameID];
-
+                    particles_in_scene.Add(tr.particleName);
                     foreach (ushort id in tr.processIDs)
                         tr.processes.Add(stringTable[id]);
                 }
@@ -669,58 +669,78 @@ public class NewBehaviourScript : MonoBehaviour
         public GameObject obj;    // reference to actual collider
     }
 
-    void Recompute()
+    void Recompute(bool overriden = false)
     {
-        Vector3 camPos = player.position;
-
-        float activateR2 = activateRadius * activateRadius;
-        float releaseR2 = releaseRadius * releaseRadius;
-
-        nextActiveSet.Clear();
-
-        foreach (int idx in activeSet)
+        if (!overriden)
         {
-            var seg = colliders[idx];
+            Vector3 camPos = player.position;
 
-            float d2 = SqrDistancePointToSegment(
-                camPos,
-                seg.start,
-                seg.end
-            );
+            float activateR2 = activateRadius * activateRadius;
+            float releaseR2 = releaseRadius * releaseRadius;
 
-            if (d2 <= releaseR2)
+            nextActiveSet.Clear();
+
+            foreach (int idx in activeSet)
             {
-                nextActiveSet.Add(idx);
+                var seg = colliders[idx];
+
+                float d2 = SqrDistancePointToSegment(
+                    camPos,
+                    seg.start,
+                    seg.end
+                );
+
+                if (d2 <= releaseR2)
+                {
+                    nextActiveSet.Add(idx);
+                }
+                else
+                {
+                    seg.obj.SetActive(false);
+                }
             }
-            else
+
+            for (int i = 0; i < colliders.Count && nextActiveSet.Count < maxActive; i++)
             {
-                seg.obj.SetActive(false);
+                if (nextActiveSet.Contains(i))
+                    continue;
+
+                var seg = colliders[i];
+
+                float d2 = SqrDistancePointToSegment(
+                    camPos,
+                    seg.start,
+                    seg.end
+                );
+
+                if (d2 <= activateR2)
+                {
+                    seg.obj.SetActive(true);
+                    nextActiveSet.Add(i);
+                }
+            }
+
+            var temp = activeSet;
+            activeSet = nextActiveSet;
+                nextActiveSet = temp;
+        }
+        else
+        {
+            // activate all colliders
+            UnityEngine.Debug.Log("[NBS][Recompute] Collider deactivation overriden");
+            activeSet.Clear();
+            nextActiveSet.Clear();
+
+            for (int i = 0; i < colliders.Count; i++)
+            {
+                var seg = colliders[i];
+
+                if (!seg.obj.activeSelf)
+                    seg.obj.SetActive(true);
+
+                activeSet.Add(i);
             }
         }
-
-        for (int i = 0; i < colliders.Count && nextActiveSet.Count < maxActive; i++)
-        {
-            if (nextActiveSet.Contains(i))
-                continue;
-
-            var seg = colliders[i];
-
-            float d2 = SqrDistancePointToSegment(
-                camPos,
-                seg.start,
-                seg.end
-            );
-
-            if (d2 <= activateR2)
-            {
-                seg.obj.SetActive(true);
-                nextActiveSet.Add(i);
-            }
-        }
-
-        var temp = activeSet;
-        activeSet = nextActiveSet;
-        nextActiveSet = temp;
     }
 
 
@@ -953,7 +973,7 @@ public class NewBehaviourScript : MonoBehaviour
 
         // Instantiate particle at first position
         GameObject sph = Instantiate(movie_prefab, track.positions[0], Quaternion.identity);
-        sph.GetComponent<Renderer>().material.color = GetColor(track.type);
+        sph.GetComponent<Renderer>().material.color = track.color;
         sph.transform.localScale = Vector3.one * 0.08f;
 
         // Trail setup
@@ -962,7 +982,7 @@ public class NewBehaviourScript : MonoBehaviour
         trail.startWidth = 0.1f;
         trail.endWidth = 0f;
         trail.material = new Material(Shader.Find("Sprites/Default"));
-        trail.startColor = GetColor(track.type);
+        trail.startColor = track.color;
         trail.endColor = new Color(1, 1, 1, 0);
         trail.Clear();
 
@@ -1076,7 +1096,7 @@ public class NewBehaviourScript : MonoBehaviour
         
         foreach (string pname in particles_in_scene)
         {
-            //UnityEngine.Debug.Log("[FORMAT-CUTS] Adding cut option for "+ pname);
+            UnityEngine.Debug.Log("[FORMAT-CUTS] Adding cut option for "+ pname);
             GameObject temp = Instantiate(toggle_prefab);
             temp.GetComponentInChildren<UnityEngine.UI.Text>().text = pname;
             temp.GetComponent<Toggle>().isOn = true;
