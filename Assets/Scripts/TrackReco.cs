@@ -348,7 +348,7 @@ public class NewBehaviourScript : MonoBehaviour
                     double tracktime = time[i];
                     double e = energy[i];
                     double d = edep[i];
-                    UnityEngine.Debug.Log("EDEP value:"+ d);
+                    //UnityEngine.Debug.Log("EDEP value:"+ d);
 
                     if (tracktime < minT) minT = tracktime;
                     if (tracktime > maxT) maxT = tracktime;
@@ -362,9 +362,6 @@ public class NewBehaviourScript : MonoBehaviour
                     tr.pz.Add(pz[i]);
                     tr.edeps.Add(d);
                 }
-
-                particles_in_scene.Add(pname);
-
             }
 
             List<string> stringTable = new List<string>();
@@ -381,7 +378,7 @@ public class NewBehaviourScript : MonoBehaviour
                 foreach (Track tr in typeDict.Values)
                 {
                     tr.particleName = stringTable[tr.particleNameID];
-
+                    particles_in_scene.Add(tr.particleName);
                     foreach (ushort id in tr.processIDs)
                         tr.processes.Add(stringTable[id]);
                 }
@@ -976,7 +973,7 @@ public class NewBehaviourScript : MonoBehaviour
 
         // Instantiate particle at first position
         GameObject sph = Instantiate(movie_prefab, track.positions[0], Quaternion.identity);
-        sph.GetComponent<Renderer>().material.color = GetColor(track.type);
+        sph.GetComponent<Renderer>().material.color = track.color;
         sph.transform.localScale = Vector3.one * 0.08f;
 
         // Trail setup
@@ -985,7 +982,7 @@ public class NewBehaviourScript : MonoBehaviour
         trail.startWidth = 0.1f;
         trail.endWidth = 0f;
         trail.material = new Material(Shader.Find("Sprites/Default"));
-        trail.startColor = GetColor(track.type);
+        trail.startColor = track.color;
         trail.endColor = new Color(1, 1, 1, 0);
         trail.Clear();
 
@@ -1099,7 +1096,7 @@ public class NewBehaviourScript : MonoBehaviour
         
         foreach (string pname in particles_in_scene)
         {
-            //UnityEngine.Debug.Log("[FORMAT-CUTS] Adding cut option for "+ pname);
+            UnityEngine.Debug.Log("[FORMAT-CUTS] Adding cut option for "+ pname);
             GameObject temp = Instantiate(toggle_prefab);
             temp.GetComponentInChildren<UnityEngine.UI.Text>().text = pname;
             temp.GetComponent<Toggle>().isOn = true;
