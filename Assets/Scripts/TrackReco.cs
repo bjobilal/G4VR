@@ -749,13 +749,15 @@ public class NewBehaviourScript : MonoBehaviour
         GameObject cutsButton = GameObject.Find("CButton");
         GameObject movieButton = GameObject.Find("MButton");
         GameObject edepButton = GameObject.Find("EButton");
+
         cutsButton.GetComponent<Button>().onClick.AddListener(ShowCutsBoard);
         movieButton.GetComponent<Button>().onClick.AddListener(movie_init);
 
-        TrackAnalyser runningInstance = GetComponent<TrackAnalyser>(); 
-        edepButton.GetComponent<Button>().onClick.AddListener(() => runningInstance.ModeSwitch(edepButton));
+        TrackAnalyser runningInstance = GetComponent<TrackAnalyser>();
 
-        //UnityEngine.Debug.Log(movieButton);
+        Button edepBtn = edepButton.GetComponent<Button>();
+        edepBtn.onClick.RemoveAllListeners(); // 🔹 clear existing listeners
+        edepBtn.onClick.AddListener(() => runningInstance.ModeSwitch(edepButton));
     }
 
     private float checkScaleFromPosition(float val)
