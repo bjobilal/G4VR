@@ -16,6 +16,7 @@ using TMPro;
 using static System.Net.Mime.MediaTypeNames;
 using UnityEngine.Experimental.GlobalIllumination;
 using System.Text.RegularExpressions;
+using System.Globalization;
 using JetBrains.Annotations;
 using XCharts.Runtime;
 using UnityEngine.SceneManagement;
@@ -283,7 +284,7 @@ public class NewBehaviourScript : MonoBehaviour
                 for (int i = 0; i < n; i++) processID[i] = reader.ReadUInt16();
 
                 string pname = null;
-                string type = charge.ToString();
+                string type = charge.ToString(CultureInfo.InvariantCulture);
 
                 bool colorByRGB = !(r == 0f && g == 0f && b == 0f);
 
@@ -483,11 +484,11 @@ public class NewBehaviourScript : MonoBehaviour
                 if (values[0] == "track") // process tracks; TODO: logic to process hits (future work)
                 {
                     //Debug.Log("Parsing CSV");
-                    int trackID = int.Parse(values[1]);
+                    int trackID = int.Parse(values[1], CultureInfo.InvariantCulture);
                     float posX, posY, posZ;
-                    posX = -float.Parse(values[5]);
-                    posY = float.Parse(values[6]);
-                    posZ = float.Parse(values[7]);
+                    posX = -float.Parse(values[5], CultureInfo.InvariantCulture);
+                    posY = float.Parse(values[6], CultureInfo.InvariantCulture);
+                    posZ = float.Parse(values[7], CultureInfo.InvariantCulture);
                     List<float> poss = new List<float>() { Math.Abs(posX), Math.Abs(posY), Math.Abs(posZ) };
                     if (!checkScale)
                     {
@@ -505,18 +506,18 @@ public class NewBehaviourScript : MonoBehaviour
 
                         checkScale = true;
                     }
-                    posX = -float.Parse(values[5]) * checkedScale;
-                    posY = float.Parse(values[6]) * checkedScale;
-                    posZ = float.Parse(values[7]) * checkedScale;
+                    posX = -float.Parse(values[5], CultureInfo.InvariantCulture) * checkedScale;
+                    posY = float.Parse(values[6], CultureInfo.InvariantCulture) * checkedScale;
+                    posZ = float.Parse(values[7], CultureInfo.InvariantCulture) * checkedScale;
 
                     double energy = ParseHelper.ParseEnergy(values[14]);
                     double time = ParseHelper.ParseTime(values[8]);
                     string pname = values[2];
 
-                    double px = float.Parse(values[11]);
+                    double px = float.Parse(values[11], CultureInfo.InvariantCulture);
 
-                    double py = float.Parse(values[12]);
-                    double pz = float.Parse(values[13]);
+                    double py = float.Parse(values[12], CultureInfo.InvariantCulture);
+                    double pz = float.Parse(values[13], CultureInfo.InvariantCulture);
 
                     // COLORING 
                     bool colorByRGB = false;
@@ -524,9 +525,9 @@ public class NewBehaviourScript : MonoBehaviour
                     string type = values[3];// type == charge. it is used to color tracks by GEANT4 convention; alternatively, coloured if RGB specified.
                     try
                     {
-                        float r = float.Parse(values[15]);
-                        float g = float.Parse(values[16]);
-                        float b = float.Parse(values[17]);
+                        float r = float.Parse(values[15], CultureInfo.InvariantCulture);
+                        float g = float.Parse(values[16], CultureInfo.InvariantCulture);
+                        float b = float.Parse(values[17], CultureInfo.InvariantCulture);
 
                         colorByRGB = true;
                         trackColor = new Color(r * 255f, g * 255f, b * 255f);
@@ -756,7 +757,7 @@ public class NewBehaviourScript : MonoBehaviour
         TrackAnalyser runningInstance = GetComponent<TrackAnalyser>();
 
         Button edepBtn = edepButton.GetComponent<Button>();
-        edepBtn.onClick.RemoveAllListeners(); // 🔹 clear existing listeners
+        edepBtn.onClick.RemoveAllListeners(); 
         edepBtn.onClick.AddListener(() => runningInstance.ModeSwitch(edepButton));
     }
 
@@ -1267,9 +1268,9 @@ public class NewBehaviourScript : MonoBehaviour
 
     public static Color GetColor(string type)
         {
-            if (float.Parse(type) > 0)
+            if (float.Parse(type, CultureInfo.InvariantCulture) > 0)
                 return Color.blue;
-            else if (float.Parse(type) < 0)
+            else if (float.Parse(type, CultureInfo.InvariantCulture) < 0)
                 return Color.red;
             return Color.green;
         }
@@ -1317,7 +1318,7 @@ public class ParseHelper : MonoBehaviour
         if (!TUnits.ContainsKey(unit))
             throw new KeyNotFoundException($"Unknown time unit: {unit}");
 
-        return double.Parse(valueStr) * TUnits[unit];
+        return double.Parse(valueStr, CultureInfo.InvariantCulture) * TUnits[unit];
     }
 
     public static double ParseEnergy(string fullstr)
@@ -1333,7 +1334,7 @@ public class ParseHelper : MonoBehaviour
         if (!EUnits.ContainsKey(unit))
             throw new KeyNotFoundException($"Unknown energy unit: {unit}");
 
-        return double.Parse(valueStr) * EUnits[unit];
+        return double.Parse(valueStr, CultureInfo.InvariantCulture) * EUnits[unit];
     }
 }
 
