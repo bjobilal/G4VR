@@ -52,8 +52,6 @@ public class NewBehaviourScript : MonoBehaviour
     public Dictionary<string, List<GameObject>> time_control = new Dictionary<string, List<GameObject>>(); // string is time and list<gameobject> is all the tracks which appear at that time.
     //private static Dictionary<int, List<Vector3>> trackPoints = new Dictionary<int, List<Vector3>>();
 
-    //public Dictionary<string, List<Track>> trackOriginTimes = new Dictionary<string, List<Track>>(); // stores information about the tracks that appear at the string time
-    SortedDictionary<double, List<Track>> trackOriginTimes;
     public static List<ColliderEntry> colliders = new List<ColliderEntry>();
 
     // SETTINGS AND STATES TO MANAGE COLLIDERS
@@ -205,6 +203,9 @@ public class NewBehaviourScript : MonoBehaviour
             timer = 0f;
             Recompute(overriden);
         }
+
+        if (movieClockRunning)
+            UpdateMovie();
     }
 
     void LateUpdate()
@@ -388,18 +389,11 @@ public class NewBehaviourScript : MonoBehaviour
             Debug.Log("Finished reading BIN file.");
         }
 
-        int F = 30;
-        var trackOriginTimesRaw = new SortedDictionary<double, List<Track>>();
-
         foreach (var typeEntry in trackInfo)
         {
             foreach (var kv in typeEntry.Value)
             {
                 var tval = kv.Value;
-                double t0 = tval.times[0]; // first step of this track
-                if (!trackOriginTimesRaw.ContainsKey(t0))
-                    trackOriginTimesRaw[t0] = new List<Track>();
-                trackOriginTimesRaw[t0].Add(tval);
 
                 foreach (var ti in tval.times)
                 {
@@ -410,25 +404,6 @@ public class NewBehaviourScript : MonoBehaviour
                 tracks.Add(tval.trackObj); // keep list of all track GameObjects
             }
         }
-        //foreach (var typeEntry in trackInfo) { var tracksByType = typeEntry.Value; foreach (var track in tracksByType) { var tval = track.Value; if (tval == null) { //Debug.LogError($"track.Value IS NULL for key {track.Key} in type {typeEntry.Key}"); continue; } //Debug.Log($"Adding track: ID={tval.ID}, times0={tval.times?[0] ?? double.NaN}, obj={tval.trackObj}, hash={tval.GetHashCode()}"); tracks.Add(tval.trackObj); string originKey = Convert.ToString(tval.times[0]); if (!trackOriginTimes.ContainsKey(originKey)) trackOriginTimes.Add(originKey, new List<Track> { tval }); else trackOriginTimes[originKey].Add(tval); for (int i = 0; i < tval.times.Count; i++) { double ti = tval.times[i]; if (!time_control.ContainsKey(Convert.ToString(ti))) time_control.Add(Convert.ToString(ti), new List<GameObject>()); } //Debug.Log($"time of {tval.ID} is {tval.times[0]}"); } }
-
-
-        // Step 2: scale all times into movie seconds
-        trackOriginTimes = new SortedDictionary<double, List<Track>>();
-
-        foreach (var kv in trackOriginTimesRaw)
-        {
-            double rawTime = kv.Key;
-            double scaledTime = F * ((rawTime - minT) / (maxT - minT)); // 0..F seconds
-            trackOriginTimes[scaledTime] = kv.Value;
-        }
-
-        // Now trackOriginTimes.Keys are numeric floats/doubles, no collisions
-        Debug.Log($"[TRACK ORIGINS] Scaled range: {trackOriginTimes.First().Key:F3}s → {trackOriginTimes.Last().Key:F3}s");
-
-
-
-
 
         sortedKeys = time_control.Keys.OrderBy(key => key).ToList();
 
@@ -590,21 +565,12 @@ public class NewBehaviourScript : MonoBehaviour
         //time_scale = 10.0f / (maxT - minT); // this needs an associated slider. 
         //Debug.Log("trackinfo length: " + trackInfo.Count);
 
-        // Step 1: keep raw times as double keys
-        int F = 30;
-        var trackOriginTimesRaw = new SortedDictionary<double, List<Track>>();
-
         foreach (var typeEntry in trackInfo)
         {
             foreach (var kv in typeEntry.Value)
             {
                 var tval = kv.Value;
-                double t0 = tval.times[0]; // first step of this track
-                if (!trackOriginTimesRaw.ContainsKey(t0))
-                    trackOriginTimesRaw[t0] = new List<Track>();
-                trackOriginTimesRaw[t0].Add(tval);
 
-                // --- time_control logic ---
                 foreach (var ti in tval.times)
                 {
                     if (!time_control.ContainsKey(ti.ToString()))
@@ -614,25 +580,6 @@ public class NewBehaviourScript : MonoBehaviour
                 tracks.Add(tval.trackObj); // keep list of all track GameObjects
             }
         }
-        //foreach (var typeEntry in trackInfo) { var tracksByType = typeEntry.Value; foreach (var track in tracksByType) { var tval = track.Value; if (tval == null) { //Debug.LogError($"track.Value IS NULL for key {track.Key} in type {typeEntry.Key}"); continue; } //Debug.Log($"Adding track: ID={tval.ID}, times0={tval.times?[0] ?? double.NaN}, obj={tval.trackObj}, hash={tval.GetHashCode()}"); tracks.Add(tval.trackObj); string originKey = Convert.ToString(tval.times[0]); if (!trackOriginTimes.ContainsKey(originKey)) trackOriginTimes.Add(originKey, new List<Track> { tval }); else trackOriginTimes[originKey].Add(tval); for (int i = 0; i < tval.times.Count; i++) { double ti = tval.times[i]; if (!time_control.ContainsKey(Convert.ToString(ti))) time_control.Add(Convert.ToString(ti), new List<GameObject>()); } //Debug.Log($"time of {tval.ID} is {tval.times[0]}"); } }
-
-
-        // Step 2: scale all times into movie seconds
-        trackOriginTimes = new SortedDictionary<double, List<Track>>();
-
-        foreach (var kv in trackOriginTimesRaw)
-        {
-            double rawTime = kv.Key;
-            double scaledTime = F * ((rawTime - minT) / (maxT - minT)); // 0..F seconds
-            trackOriginTimes[scaledTime] = kv.Value;
-        }
-
-        // Now trackOriginTimes.Keys are numeric floats/doubles, no collisions
-        Debug.Log($"[TRACK ORIGINS] Scaled range: {trackOriginTimes.First().Key:F3}s → {trackOriginTimes.Last().Key:F3}s");
-
-
-
-
 
         sortedKeys = time_control.Keys.OrderBy(key => key).ToList();
 
@@ -888,7 +835,25 @@ public class NewBehaviourScript : MonoBehaviour
     }
 
     public float movieDuration = 30f;  // seconds of total playback
-    private Coroutine movieRoutine;
+
+    // How real simulation time gets compressed into the movie window.
+    // Linear preserves relative speeds and is what most runs should use.
+    // Log spreads a wide dynamic range (ps bursts followed by a long, sparse
+    // tail) across the window instead, at the cost of screen-space speed no
+    // longer being literal. Auto picks Linear unless the run's time range is
+    // wide enough that linear would hide most of the action.
+    public enum TimeScaleMode { Linear, Log, Auto }
+    public TimeScaleMode movieTimeScaleMode = TimeScaleMode.Auto;
+
+    // Used only when movieTimeScaleMode == Auto. If the run's (maxT - minT)
+    // exceeds this many ps, the time range is considered "very large" and
+    // Log is selected; otherwise Linear is used. Default is 1e4 ps (10 ns).
+    public double autoLogRangeThresholdPs = 1e4;
+
+    private TimeScaleMode effectiveTimeScaleMode;
+    private bool movieClockRunning = false;
+    private float movieClock;
+    private List<Track> movieTracksCache;
 
     // --- Initialize movie mode ---
     public void movie_init()
@@ -906,17 +871,45 @@ public class NewBehaviourScript : MonoBehaviour
         Menus.SetActive(false);
         Controls.SetActive(false);
         var component = GetComponent<MeshRenderer>();
-        component.enabled = false;  
+        component.enabled = false;
 
-        if (movieRoutine != null)
-            StopCoroutine(movieRoutine);
-        movieRoutine = StartCoroutine(movie());
+        // clean up any particles left over from a movie run already in progress
+        movieClockRunning = false;
+        if (movieTracksCache != null)
+        {
+            foreach (var track in movieTracksCache)
+                DespawnMovieTrack(track);
+        }
+
+        effectiveTimeScaleMode = ResolveTimeScaleMode();
+        PrecomputeMovieTimes();
+
+        movieTracksCache = trackInfo.Values
+            .SelectMany(d => d.Values)
+            .Where(t => t.positions != null && t.positions.Count >= 2 && t.movieTimes.Count == t.positions.Count)
+            .ToList();
+
+        foreach (var track in movieTracksCache)
+            track.movieCursor = 0;
+
+        Debug.Log($"[MOVIE] Start Time: {minT} ps, End Time: {maxT} ps, mode: {effectiveTimeScaleMode}");
+
+        movieClock = 0f;
+        movieClockRunning = true;
     }
 
     // --- Cleanup ---
     public void movie_deinit()
     {
         Debug.Log("[MOVIE] Deinitializing movie...");
+
+        movieClockRunning = false;
+
+        if (movieTracksCache != null)
+        {
+            foreach (var track in movieTracksCache)
+                DespawnMovieTrack(track);
+        }
 
         // Reactivate original track objects
         foreach (var typeEntry in trackInfo)
@@ -932,54 +925,114 @@ public class NewBehaviourScript : MonoBehaviour
         component.enabled = true;
     }
 
-    // --- Main playback controller ---
-    private IEnumerator movie()
+    // When movieTimeScaleMode is Auto, decides Linear vs Log from the run's actual
+    // time range instead of a fixed guess. Explicit Linear/Log selections pass through.
+    private TimeScaleMode ResolveTimeScaleMode()
     {
-        Debug.Log($"[MOVIE] Start Time: {minT} ps, End Time: {maxT} ps");
+        if (movieTimeScaleMode != TimeScaleMode.Auto)
+            return movieTimeScaleMode;
 
-        var orderedTrackOrigins = trackOriginTimes;
-
-        float startSceneTime = Time.time;
-
-        float movieStartTime = Time.time;
-
-        foreach (var kvp in orderedTrackOrigins)
-        {
-            foreach (var track in kvp.Value)
-            {
-            }
-
-            float trackStart = (float)kvp.Key;  // movie seconds
-            float wait = trackStart - (Time.time - movieStartTime);
-            if (wait > 0f)
-                yield return new WaitForSeconds(wait);
-
-            foreach (Track track in kvp.Value)
-                StartCoroutine(Move(track, trackStart));
-        }
-
-
-        // Wait until full movie length has passed
-        float remaining = Mathf.Max(0f, movieDuration - (Time.time - startSceneTime));
-        yield return new WaitForSeconds(remaining);
-
-        movie_deinit();
+        double range = maxT - minT;
+        TimeScaleMode resolved = range > autoLogRangeThresholdPs ? TimeScaleMode.Log : TimeScaleMode.Linear;
+        Debug.Log($"[MOVIE] Auto time-scale: range={range:E2} ps vs threshold={autoLogRangeThresholdPs:E2} ps -> {resolved}");
+        return resolved;
     }
 
-
-
-    // --- Animate a single track ---
-    private IEnumerator Move(Track track, float originOffset)
+    // Maps a physical time (ps) into [0, movieDuration] once per track, up front,
+    // so playback never has to re-derive the mapping (and can't drift out of sync
+    // with the window it was scaled for).
+    private void PrecomputeMovieTimes()
     {
-        if (track.positions == null || track.positions.Count < 2)
-            yield break;
+        foreach (var typeEntry in trackInfo)
+        {
+            foreach (var track in typeEntry.Value.Values)
+            {
+                track.movieTimes.Clear();
+                foreach (double t in track.times)
+                    track.movieTimes.Add(RemapTime(t));
+            }
+        }
+    }
 
-        // Instantiate particle at first position
+    private double RemapTime(double t)
+    {
+        double range = maxT - minT;
+        if (range <= 0)
+            return 0;
+
+        if (effectiveTimeScaleMode == TimeScaleMode.Log)
+        {
+            double epsilon = range * 1e-6;
+            double logMin = Math.Log10(epsilon);
+            double logMax = Math.Log10(range + epsilon);
+            double logT = Math.Log10((t - minT) + epsilon);
+            double frac = (logT - logMin) / (logMax - logMin);
+            frac = Math.Max(0.0, Math.Min(1.0, frac));
+            return movieDuration * frac;
+        }
+        else
+        {
+            double frac = (t - minT) / range;
+            frac = Math.Max(0.0, Math.Min(1.0, frac));
+            return movieDuration * frac;
+        }
+    }
+
+    // --- Advance the single authoritative movie clock and place every particle ---
+    private void UpdateMovie()
+    {
+        movieClock += Time.deltaTime;
+
+        if (movieClock >= movieDuration)
+        {
+            movieClock = movieDuration;
+            EvaluateMovieTracks();
+            movie_deinit(); // guarantees playback never runs past movieDuration
+            return;
+        }
+
+        EvaluateMovieTracks();
+    }
+
+    private void EvaluateMovieTracks()
+    {
+        foreach (var track in movieTracksCache)
+            EvaluateTrack(track);
+    }
+
+    private void EvaluateTrack(Track track)
+    {
+        List<double> mt = track.movieTimes;
+        int n = mt.Count;
+
+        if (movieClock < mt[0] || movieClock > mt[n - 1])
+        {
+            if (track.movieSpawned)
+                DespawnMovieTrack(track);
+            return;
+        }
+
+        if (!track.movieSpawned)
+            SpawnMovieTrack(track);
+
+        // movieClock only moves forward, so the cursor only ever advances.
+        while (track.movieCursor < n - 2 && mt[track.movieCursor + 1] < movieClock)
+            track.movieCursor++;
+
+        int i = track.movieCursor;
+        double segStart = mt[i];
+        double segEnd = mt[i + 1];
+        float t = segEnd > segStart ? Mathf.Clamp01((float)((movieClock - segStart) / (segEnd - segStart))) : 1f;
+
+        track.movieObj.transform.position = Vector3.Lerp(track.positions[i], track.positions[i + 1], t);
+    }
+
+    private void SpawnMovieTrack(Track track)
+    {
         GameObject sph = Instantiate(movie_prefab, track.positions[0], Quaternion.identity);
         sph.GetComponent<Renderer>().material.color = track.color;
         sph.transform.localScale = Vector3.one * 0.08f;
 
-        // Trail setup
         TrailRenderer trail = sph.AddComponent<TrailRenderer>();
         trail.time = 1f;
         trail.startWidth = 0.1f;
@@ -989,57 +1042,30 @@ public class NewBehaviourScript : MonoBehaviour
         trail.endColor = new Color(1, 1, 1, 0);
         trail.Clear();
 
-        // Precompute scaled times (absolute movie seconds)
-        List<double> scaledTimes = track.times
-            .Select(t => ((t - minT) / (maxT - minT) * movieDuration))
-            .ToList();
+        track.movieObj = sph;
+        track.movieTrail = trail;
+        track.movieSpawned = true;
+        track.movieCursor = 0;
+    }
 
-        float sceneStart = Time.time;
+    private void DespawnMovieTrack(Track track)
+    {
+        if (!track.movieSpawned)
+            return;
 
-        for (int i = 0; i < track.positions.Count - 1; i++)
+        if (track.movieTrail != null)
         {
-            Vector3 start = track.positions[i];
-            Vector3 end = track.positions[i + 1];
-
-            double startTime = scaledTimes[i];
-            double endTime = scaledTimes[i + 1];
-
-            if (endTime <= startTime)
-                continue;
-
-            // Wait until segment start
-            float elapsed = Time.time - sceneStart;
-            float waitTime = (float)(startTime - originOffset - elapsed);
-            if (waitTime > 0f)
-                yield return new WaitForSeconds(waitTime);
-
-            // Animate this segment smoothly
-            float segmentElapsed = 0f;
-
-            // applying a small boost (set to 1f to remove entirely)
-            const float speedBoost = 1.1f;  // 1% faster
-            float segmentDuration = (float)(endTime - startTime) / speedBoost;
-
-            while (segmentElapsed < segmentDuration)
-            {
-                segmentElapsed += Time.deltaTime;
-                float t = Mathf.Clamp01(segmentElapsed / segmentDuration);
-                sph.transform.position = Vector3.Lerp(start, end, t);
-                yield return null;
-            }
-
-            sph.transform.position = end;
+            track.movieTrail.transform.SetParent(null, true);
+            track.movieTrail.emitting = false;
+            Destroy(track.movieTrail.gameObject, track.movieTrail.time);
         }
 
-        // Detach and fade trail
-        if (trail != null)
-        {
-            trail.transform.SetParent(null, true);
-            trail.emitting = false;
-            Destroy(trail.gameObject, trail.time);
-        }
+        if (track.movieObj != null)
+            Destroy(track.movieObj);
 
-        Destroy(sph);
+        track.movieObj = null;
+        track.movieTrail = null;
+        track.movieSpawned = false;
     }
 
 
@@ -1154,6 +1180,12 @@ public class NewBehaviourScript : MonoBehaviour
         public List<ushort> processIDs = new List<ushort>();
         public ushort particleNameID;
 
+        // movie mode: times[] remapped into [0, movieDuration], plus per-track playback state
+        public List<double> movieTimes = new List<double>();
+        public int movieCursor;
+        public bool movieSpawned;
+        public GameObject movieObj;
+        public TrailRenderer movieTrail;
 
         public void DrawTrack(Dictionary<string, List<GameObject>> list)
         {
