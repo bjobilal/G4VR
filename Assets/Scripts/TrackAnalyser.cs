@@ -32,7 +32,7 @@ public class TrackAnalyser : MonoBehaviour
     //private static bool on_analysis; // if on_analysis is true -> you show edeps. if on_analysis is false -> you go back to tracks
 
 
-    public static Dictionary<string, Dictionary<int, NewBehaviourScript.Track>> trackInfo = NewBehaviourScript.trackInfo;
+    public static Dictionary<string, Dictionary<long, NewBehaviourScript.Track>> trackInfo = NewBehaviourScript.trackInfo;
 
     public static Dictionary<GameObject, List<double>> edep_bypiece = new Dictionary<GameObject, List<double>>();
 
@@ -148,41 +148,171 @@ public class TrackAnalyser : MonoBehaviour
 
     public static void LogEdep()
     {
-        //DebugBoardTextTransform.GetComponent<TextMeshProUGUI>().text += "Entered LogEdep \n "; // DEBUG ONLY
-
         Physics.SyncTransforms();
+
+        foreach (var geo in edep_bypiece)
+            geo.Value.Clear();
+
+        Dictionary<GameObject, Collider> colliderByGeo = PrepareGeometryColliders();
+
+        // Custom/binary scenes carry the actual GEANT4 volume each step occurred in, so use that
+        // directly instead of guessing geometrically. CSV example scenes have no such data, so they
+        // keep the old collider-overlap approximation (which double-counts edep in nested volumes,
+        // since GEANT4 itself never produces overlapping volumes to begin with).
+        if (NewBehaviourScript.hasVolumeInfo)
+            LogEdepByVolumeID();
+        else
+            LogEdepByOverlap(colliderByGeo);
+    }
+
+    // Ensures every geometry piece has a (convex) MeshCollider + XRSimpleInteractable for click-to-inspect,
+    // regardless of which edep-accounting method is used below.
+    private static Dictionary<GameObject, Collider> PrepareGeometryColliders()
+    {
+        Dictionary<GameObject, Collider> colliderByGeo = new Dictionary<GameObject, Collider>();
+
         foreach (var geo in edep_bypiece)
         {
-            geo.Value.Clear();   // ADD THIS
             GameObject temp = geo.Key;
-            Collider tempCollider = null;
-            try { tempCollider = temp.GetComponent<MeshCollider>(); }
-            catch { }
+            MeshCollider tempCollider = temp.GetComponent<MeshCollider>();
             if (tempCollider == null)
             {
                 tempCollider = temp.AddComponent<MeshCollider>();
-                temp.GetComponent<MeshCollider>().convex = true; 
+                tempCollider.convex = true;
+            }
+            if (!tempCollider.enabled)
+                tempCollider.enabled = true;
+
+            XRSimpleInteractable interactable = temp.GetComponent<XRSimpleInteractable>();
+            if (interactable == null)
+            {
+                interactable = temp.AddComponent<XRSimpleInteractable>();
+                interactable.selectEntered.AddListener((interactor) => onHit(temp));
             }
 
-            try
+            colliderByGeo[temp] = tempCollider;
+        }
+
+        return colliderByGeo;
+    }
+
+    // Custom/binary scenes: GEANT4's navigator already resolved each step to exactly one physical
+    // volume (it never allows overlapping volumes), so match by the recorded volume name instead of
+    // testing collider overlap. volumeNames[i] and edeps[i] come from the same trajectory point, so
+    // they're aligned by index. GEANT4 copy numbers aren't preserved in the exported name, so a
+    // segmented volume (calorimeter cells, tracker layers, ...) produces several geometry pieces that
+    // all share one name -- those get disambiguated geometrically in ResolveInstance.
+    private static void LogEdepByVolumeID()
+    {
+        Dictionary<string, List<GameObject>> geoGroupsByName = new Dictionary<string, List<GameObject>>();
+        foreach (GameObject g in edep_bypiece.Keys)
+        {
+            if (!geoGroupsByName.TryGetValue(g.name, out List<GameObject> group))
             {
-                XRSimpleInteractable interactable = temp.GetComponent<XRSimpleInteractable>();
-                if (interactable == null)
+                group = new List<GameObject>();
+                geoGroupsByName[g.name] = group;
+            }
+            group.Add(g);
+        }
+
+        HashSet<string> unresolved = new HashSet<string>();
+        HashSet<string> fallbackWarned = new HashSet<string>();
+
+        foreach (var typeEntry in trackInfo)
+        {
+            foreach (var track in typeEntry.Value)
+            {
+                NewBehaviourScript.Track currTrack = track.Value;
+                int count = Mathf.Min(currTrack.volumeNames.Count, currTrack.edeps.Count);
+
+                for (int i = 0; i < count; i++)
                 {
-                    interactable = temp.AddComponent<XRSimpleInteractable>();
-                    interactable.selectEntered.AddListener((interactor) => onHit(temp));
+                    string volumeName = currTrack.volumeNames[i];
+                    if (string.IsNullOrEmpty(volumeName))
+                        continue;
+
+                    if (!geoGroupsByName.TryGetValue(volumeName, out List<GameObject> candidates))
+                    {
+                        if (unresolved.Add(volumeName))
+                            Debug.LogWarning($"[TRACK-ANALYSER] Step reports volume '{volumeName}' with no matching geometry piece; edep not attributed.");
+                        continue;
+                    }
+
+                    GameObject target = candidates.Count == 1
+                        ? candidates[0]
+                        : ResolveInstance(candidates, currTrack.positions[i], volumeName, fallbackWarned);
+
+                    if (target != null)
+                        edep_bypiece[target].Add(currTrack.edeps[i]);
                 }
             }
-            catch { }
-            double totaledep = 0;
-            foreach (var typeEntry in trackInfo) // type is charge. 
+        }
+    }
+
+    // Disambiguates several same-named geometry pieces (e.g. the many identical cells of a segmented
+    // calorimeter) by testing which instance's collider actually contains the step's recorded
+    // position. Colliders here are always convex (see PrepareGeometryColliders), so Collider.ClosestPoint
+    // returns the point itself when it's inside -- the standard Unity idiom for point-in-collider.
+    private static GameObject ResolveInstance(List<GameObject> candidates, Vector3 position, string volumeName, HashSet<string> fallbackWarned)
+    {
+        const float containmentSqrTolerance = 1e-6f;
+
+        // Fast path: an AABB check is far cheaper than Collider.ClosestPoint, and only candidates
+        // whose bounds contain the point can possibly be the true containing instance.
+        foreach (GameObject candidate in candidates)
+        {
+            Collider collider = candidate.GetComponent<Collider>();
+            if (collider == null || !collider.bounds.Contains(position))
+                continue;
+
+            Vector3 closestPoint = collider.ClosestPoint(position);
+            if ((closestPoint - position).sqrMagnitude <= containmentSqrTolerance)
+                return candidate;
+        }
+
+        // Fallback: no instance claimed exact containment (float precision at a shared boundary, or a
+        // coordinate mismatch worth investigating) -- attribute to whichever instance is closest.
+        if (fallbackWarned.Add(volumeName))
+            Debug.LogWarning($"[TRACK-ANALYSER] No instance of '{volumeName}' exactly contains a step position; falling back to nearest instance. If this recurs often, check for a coordinate/scale mismatch between GEANT4 and the imported geometry.");
+
+        GameObject closest = null;
+        float closestSqrDist = float.PositiveInfinity;
+
+        foreach (GameObject candidate in candidates)
+        {
+            Collider collider = candidate.GetComponent<Collider>();
+            if (collider == null)
+                continue;
+
+            float sqrDist = (collider.ClosestPoint(position) - position).sqrMagnitude;
+            if (sqrDist < closestSqrDist)
+            {
+                closestSqrDist = sqrDist;
+                closest = candidate;
+            }
+        }
+
+        return closest;
+    }
+
+    // Example (CSV) scenes: no per-step volume info is available, so fall back to geometric overlap
+    // between each step's capsule collider and every geometry piece. This double-counts edep for
+    // nested volumes, but that's acceptable for the bundled example scenes.
+    private static void LogEdepByOverlap(Dictionary<GameObject, Collider> colliderByGeo)
+    {
+        foreach (var geo in edep_bypiece)
+        {
+            GameObject temp = geo.Key;
+            Collider tempCollider = colliderByGeo[temp];
+
+            foreach (var typeEntry in trackInfo) // type is charge.
             {
                 var tracksByType = typeEntry.Value; // dictionary with trackIDs and tracks
                 foreach (var track in tracksByType)
                 {
                     // track.Value is an instance of the Track class
                     NewBehaviourScript.Track currTrack = track.Value;
-                    for (int i = 0; i<currTrack.segments.Count; i++)
+                    for (int i = 0; i < currTrack.segments.Count; i++)
                     {
                         GameObject segmentObject = currTrack.segments[i];
                         if (!segmentObject.activeSelf)
@@ -194,9 +324,7 @@ public class TrackAnalyser : MonoBehaviour
                         {
                             Debug.LogError($"No CapsuleCollider on {segmentObject.name}");
                             continue;
-                        }                       
-                        if (!tempCollider.enabled)
-                            tempCollider.enabled = true;
+                        }
                         if (!segmentCollider.enabled)
                             segmentCollider.enabled = true;
 
@@ -208,16 +336,11 @@ public class TrackAnalyser : MonoBehaviour
                         if (isOverlapping)
                         {
                             geo.Value.Add(currTrack.edeps[i]);
-                            totaledep += currTrack.edeps[i];
-                            //Debug.Log($"{tempCollider.gameObject.name} has edep: {currTrack.edeps[i]} from {segmentCollider.gameObject.name} and step {i}");
                         }
                     }
                 }
             }
-
-            //Debug.Log($"{temp.name} has total edep: {totaledep}");
         }
-
     }
 
 

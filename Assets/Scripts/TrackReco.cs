@@ -46,7 +46,14 @@ public class NewBehaviourScript : MonoBehaviour
     List<string> stringTable = new List<string>(); // LUT for binary
 
     public static List<GameObject> tracks = new List<GameObject>();
-    public static Dictionary<string, Dictionary<int, Track>> trackInfo = new Dictionary<string, Dictionary<int, Track>>(); // the int in the dictionary is the track id
+    // Inner key is (eventID << 32 | trackID), NOT trackID alone: GEANT4 restarts trackID at 1 for
+    // every event, and a multi-event run's tracks all land in the same binary file, so trackID by
+    // itself is not unique across the whole run.
+    public static Dictionary<string, Dictionary<long, Track>> trackInfo = new Dictionary<string, Dictionary<long, Track>>();
+
+    // True when the loaded run carries a per-step GEANT4 volumeID (binary/Custom scenes).
+    // False for the bundled CSV example scenes, which have no such column.
+    public static bool hasVolumeInfo = false;
     public double time_scale;
     private Dictionary<Track, double> orderedtime = new Dictionary<Track, double>();
     public Dictionary<string, List<GameObject>> time_control = new Dictionary<string, List<GameObject>>(); // string is time and list<gameobject> is all the tracks which appear at that time.
@@ -131,6 +138,7 @@ public class NewBehaviourScript : MonoBehaviour
         tracks.Clear();
         markerMatrices.Clear();
         colliders.Clear();
+        hasVolumeInfo = false; // set true by ReadBIN if this run actually carries per-step volume IDs
 
         //time = GameObject.Find("Time");
         start_time = GameObject.Find("Start");
@@ -247,9 +255,38 @@ public class NewBehaviourScript : MonoBehaviour
 
             Debug.Log($"Magic={magic} version={version} strings={stringCount} tracks={trackCount}");
 
+            // Binary v2+ stores an explicit eventID per track. GEANT4 restarts trackID at 1 for every
+            // event, and a multi-event run's tracks all land in this same file, so trackID alone is not
+            // a unique key across the run. v1 files predate this field; fall back to detecting event
+            // boundaries the same way the exporter itself does (trackID==1 marks a new event).
+            bool hasExplicitEventID = version >= 2;
+            if (!hasExplicitEventID)
+                Debug.LogWarning($"[NEW-BEHAVIOUR-SCRIPT] Binary version {version} predates per-track eventID; falling back to a trackID==1 heuristic to separate events. Re-export with the current exporter for exact event attribution.");
+
+            int fallbackEventIndex = 0;
+            bool sawFirstTrack = false;
+
             for (int t = 0; t < trackCount; t++)
             {
                 int trackID = reader.ReadInt32();
+
+                int eventID;
+                if (hasExplicitEventID)
+                {
+                    eventID = reader.ReadInt32();
+                }
+                else
+                {
+                    if (trackID == 1)
+                    {
+                        if (sawFirstTrack) fallbackEventIndex++;
+                        sawFirstTrack = true;
+                    }
+                    eventID = fallbackEventIndex;
+                }
+
+                long uniqueKey = ((long)eventID << 32) | (uint)trackID;
+
                 ushort nameID = reader.ReadUInt16();
                 double charge = reader.ReadDouble();
 
@@ -269,6 +306,7 @@ public class NewBehaviourScript : MonoBehaviour
                 float[] pz = new float[n];
                 float[] energy = new float[n];
                 ushort[] processID = new ushort[n];
+                ushort[] volumeID = new ushort[n];
 
                 for (int i = 0; i < n; i++) x[i] = reader.ReadSingle();
                 for (int i = 0; i < n; i++) y[i] = reader.ReadSingle();
@@ -283,6 +321,7 @@ public class NewBehaviourScript : MonoBehaviour
                 for (int i = 0; i < n; i++) energy[i] = reader.ReadSingle();
 
                 for (int i = 0; i < n; i++) processID[i] = reader.ReadUInt16();
+                for (int i = 0; i < n; i++) volumeID[i] = reader.ReadUInt16();
 
                 string pname = null;
                 string type = charge.ToString(CultureInfo.InvariantCulture);
@@ -303,17 +342,18 @@ public class NewBehaviourScript : MonoBehaviour
 
                 if (!trackInfo.ContainsKey(type))
                 {
-                    trackInfo[type] = new Dictionary<int, Track>();
+                    trackInfo[type] = new Dictionary<long, Track>();
                 }
 
-                if (!trackInfo[type].ContainsKey(trackID))
+                if (!trackInfo[type].ContainsKey(uniqueKey))
                 {
-                    trackInfo[type][trackID] = new Track();
-                    trackInfo[type][trackID].ID = trackID;
-                    trackInstances.Add(trackInfo[type][trackID]);
+                    trackInfo[type][uniqueKey] = new Track();
+                    trackInfo[type][uniqueKey].ID = trackID;
+                    trackInfo[type][uniqueKey].eventID = eventID;
+                    trackInstances.Add(trackInfo[type][uniqueKey]);
                 }
 
-                Track tr = trackInfo[type][trackID];
+                Track tr = trackInfo[type][uniqueKey];
 
                 tr.type = type;
                 tr.particleName = pname;
@@ -359,6 +399,7 @@ public class NewBehaviourScript : MonoBehaviour
                     tr.energies.Add(e);
                     tr.times.Add(tracktime);
                     tr.processIDs.Add(processID[i]);
+                    tr.volumeIDs.Add(volumeID[i]);
                     tr.px.Add(px[i]);
                     tr.py.Add(py[i]);
                     tr.pz.Add(pz[i]);
@@ -383,9 +424,12 @@ public class NewBehaviourScript : MonoBehaviour
                     particles_in_scene.Add(tr.particleName);
                     foreach (ushort id in tr.processIDs)
                         tr.processes.Add(stringTable[id]);
+                    foreach (ushort id in tr.volumeIDs)
+                        tr.volumeNames.Add(stringTable[id]);
                 }
             }
 
+            hasVolumeInfo = true; // binary tracks always carry a per-step volumeID; CSV example scenes do not
             Debug.Log("Finished reading BIN file.");
         }
 
@@ -525,7 +569,7 @@ public class NewBehaviourScript : MonoBehaviour
 
                     if (!trackInfo.ContainsKey(type))
                     {
-                        trackInfo[type] = new Dictionary<int, Track>();
+                        trackInfo[type] = new Dictionary<long, Track>();
                         //Debug.Log("HELLO: added type to dictionary");
                     }
 
@@ -1153,9 +1197,10 @@ public class NewBehaviourScript : MonoBehaviour
         return (p - closest).sqrMagnitude;
     }
 
-    public class Track 
+    public class Track
     {
         public int ID;
+        public int eventID; // which GEANT4 event this track belongs to; only meaningful for binary/custom scenes
         public List<Vector3> positions = new List<Vector3>();
         public List<double> times = new List<double>();
         public List<double> energies = new List<double>();
@@ -1175,9 +1220,11 @@ public class NewBehaviourScript : MonoBehaviour
         public List<GameObject> segments = new List<GameObject>(); // segments of the track 
         private LayerMask raycastLayerMask; // Set this to ensure only relevant objects are hit
 
-        // only for binary/custom scene. 
+        // only for binary/custom scene.
 
         public List<ushort> processIDs = new List<ushort>();
+        public List<ushort> volumeIDs = new List<ushort>();
+        public List<string> volumeNames = new List<string>(); // resolved from volumeIDs; empty for CSV example scenes
         public ushort particleNameID;
 
         // movie mode: times[] remapped into [0, movieDuration], plus per-track playback state
