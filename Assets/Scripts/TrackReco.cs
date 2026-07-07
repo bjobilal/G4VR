@@ -748,7 +748,7 @@ public class NewBehaviourScript : MonoBehaviour
         TrackAnalyser runningInstance = GetComponent<TrackAnalyser>();
 
         Button edepBtn = edepButton.GetComponent<Button>();
-        edepBtn.onClick.RemoveAllListeners(); 
+        edepBtn.onClick.RemoveAllListeners(); // 🔹 clear existing listeners
         edepBtn.onClick.AddListener(() => runningInstance.ModeSwitch(edepButton));
     }
 
