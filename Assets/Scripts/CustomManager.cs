@@ -77,28 +77,38 @@ public class CustomManager : MonoBehaviour
 
     async Task LoadGLB(string url) // GLB is binary form of GLTF - unity recommends since embedded buffers in gltf is slow apparently. 
     {
+        // Stream the download to a temp file and let glTFast read it as a stream, so the raw GLB never occupies
+        // the managed heap (removes the ~file-size transient spike that starves track loading). See ServerGET.
+        string glbPath = System.IO.Path.Combine(Application.temporaryCachePath, "g4vr_geometry.glb");
+
         using (UnityWebRequest www = UnityWebRequest.Get(url))
         {
-            www.downloadHandler = new DownloadHandlerBuffer();
+            www.downloadHandler = new DownloadHandlerFile(glbPath) { removeFileOnAbort = true };
             var request = www.SendWebRequest();
 
             while (!request.isDone)
-               { 
-                
+               {
+
                 await Task.Yield(); }
 
             if (www.result != UnityWebRequest.Result.Success)
             {
+                TryDeleteFile(glbPath);
                 error_header.text = "URL Error";
                 error_message.text = "There was an error loading data from this address. Please check that it is reachable and try again.";
                 return;
             }
 
-            byte[] data = www.downloadHandler.data;
-            Debug.Log(data.Length);
             var gltf = new GltfImport();
-            //bool success = await gltf.LoadGltfBinary(data, new Uri(url));
-            bool success = await gltf.LoadGltfBinary(data);
+            // Keep textures non-readable and mip-less (glTFast defaults; set explicitly -- textures dominate memory).
+            var importSettings = new ImportSettings
+            {
+                GenerateMipMaps = false,
+                TexturesReadable = false
+            };
+            bool success = await gltf.LoadFile(glbPath, null, importSettings);
+            // glTFast has finished reading the file; delete it to reclaim disk and keep managed memory flat.
+            TryDeleteFile(glbPath);
             Debug.Log(success);
             success = await gltf.InstantiateMainSceneAsync(Geometry.transform);
             if (!success)
@@ -131,7 +141,29 @@ public class CustomManager : MonoBehaviour
                 drawer.Build(modelRoot);
             }
 
+            // Free imported-but-unused assets (the ~903 textures / 0.74 GB). glTFast loads every image declared
+            // in the GLB, but the scene uses only a few materials; GltfImport holds references to all of them,
+            // so we must drop `gltf`, GC it, THEN UnloadUnusedAssets to reclaim the unreferenced textures. Used
+            // assets survive (referenced by the renderers); GltfImport has no finalizer. See ServerGET.
+            gltf = null;
+            System.GC.Collect();
+            Resources.UnloadUnusedAssets();
+            System.GC.Collect();
 
+
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (System.IO.File.Exists(path))
+                System.IO.File.Delete(path);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning($"[CustomManager] Could not delete temp GLB '{path}': {e.Message}");
         }
     }
 }

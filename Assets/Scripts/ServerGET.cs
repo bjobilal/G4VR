@@ -268,33 +268,48 @@ public class ServerGET : MonoBehaviour
         loadingBar.gameObject.SetActive(true);
         statusText.text = "Downloading...";
 
+        // Stream the download straight to a temp file instead of buffering the whole GLB in the managed heap.
+        // The file is then read by glTFast as a stream, so the raw GLB never occupies managed memory at all --
+        // this removes the ~file-size (x2) transient spike that was starving TrackReco.ReadBin.
+        string glbPath = System.IO.Path.Combine(Application.temporaryCachePath, "g4vr_geometry.glb");
+
         using (UnityWebRequest www = UnityWebRequest.Get(url))
         {
             Debug.Log("Requesting at URL...");
-            www.downloadHandler = new DownloadHandlerBuffer();
+            www.downloadHandler = new DownloadHandlerFile(glbPath) { removeFileOnAbort = true };
             var request = www.SendWebRequest();
 
             while (!request.isDone)
             {
-                loadingBar.value = www.downloadProgress; 
+                loadingBar.value = www.downloadProgress;
                 await Task.Yield();
             }
 
             if (www.result != UnityWebRequest.Result.Success)
             {
+                TryDeleteFile(glbPath);
                 ShowError("URL Error", "There was an error loading data from this address. Please check that it is reachable and try again.");
                 return;
             }
 
-            byte[] data = www.downloadHandler.data;
-            Debug.Log($"Downloaded {data.Length} bytes");
+            Debug.Log($"Downloaded geometry to {glbPath}");
 
             statusText.text = "Parsing geometry...";
             loadingBar.value = 0.75f;
 
             var gltf = new GltfImport();
 
-            bool success = await gltf.LoadGltfBinary(data);
+            // Keep imported textures non-readable and mip-less (no extra CPU copy / +33% mem). These are the
+            // glTFast defaults, but set explicitly since textures are by far the largest memory consumer.
+            var importSettings = new ImportSettings
+            {
+                GenerateMipMaps = false,
+                TexturesReadable = false
+            };
+
+            bool success = await gltf.LoadFile(glbPath, null, importSettings);
+            // glTFast has finished reading the file; delete it now to reclaim the disk and keep managed memory flat.
+            TryDeleteFile(glbPath);
             if (!success)
             {
                 ShowError("Geometry Load Error", "Failed to parse geometry data.");
@@ -334,6 +349,19 @@ public class ServerGET : MonoBehaviour
             drawer.Build(modelRoot);
 
             modelRoot.SetActive(false);
+
+            // Free imported-but-UNUSED assets -- this is the big one. glTFast loads every image/material
+            // declared in the GLB (this file ships ~903 textures, ~0.74 GB) even though the instantiated
+            // geometry references only a handful of materials. GltfImport holds references to ALL of them, so
+            // UnloadUnusedAssets can't reclaim anything while `gltf` is alive. Drop the import object, GC it so
+            // its references die, THEN unload: the unreferenced textures/materials are freed while the used
+            // assets survive (still referenced by the scene's renderers). GltfImport has no finalizer, so
+            // collecting it does not destroy the Unity assets.
+            gltf = null;
+            System.GC.Collect();
+            Resources.UnloadUnusedAssets();
+            System.GC.Collect();
+
             loadingBar.value = 1f;
             statusText.text = "Model loaded.";
             loadStatus = true;
@@ -341,6 +369,19 @@ public class ServerGET : MonoBehaviour
             
             await Task.Delay(2000);
             
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (System.IO.File.Exists(path))
+                System.IO.File.Delete(path);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning($"[ServerGET] Could not delete temp GLB '{path}': {e.Message}");
         }
     }
 
