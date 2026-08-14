@@ -106,7 +106,30 @@ public class CustomManager : MonoBehaviour
             {
                 error_header.text = "Geometry Load Error";
                 error_message.text = "G4VR is unable to load the geometry data from this address. Please check your experiment and try again later";
-            }    
+            }
+
+            // Post-import render optimization (see ServerGET for the full rationale). Disable shadows, cache
+            // each piece's original mesh for TrackAnalyser's per-piece colliders, then hand rendering to
+            // InstancedGeometryDrawer, which collapses the thousands of pieces into ~a dozen instanced draw
+            // calls -- Built-in RP's automatic batchers don't handle this geometry.
+            TrackAnalyser.originalMeshes.Clear();
+            foreach (MeshRenderer mr in Geometry.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                mr.receiveShadows = false;
+                MeshFilter mf = mr.GetComponent<MeshFilter>();
+                if (mf != null && mf.sharedMesh != null)
+                    TrackAnalyser.originalMeshes[mr.gameObject] = mf.sharedMesh;
+            }
+
+            if (Geometry.transform.childCount > 0)
+            {
+                GameObject modelRoot = Geometry.transform.GetChild(0).gameObject;
+                InstancedGeometryDrawer drawer = modelRoot.GetComponent<InstancedGeometryDrawer>();
+                if (drawer == null)
+                    drawer = modelRoot.AddComponent<InstancedGeometryDrawer>();
+                drawer.Build(modelRoot);
+            }
 
 
         }

@@ -36,6 +36,13 @@ public class TrackAnalyser : MonoBehaviour
 
     public static Dictionary<GameObject, List<double>> edep_bypiece = new Dictionary<GameObject, List<double>>();
 
+    // Original per-piece meshes captured at GLB import time, BEFORE StaticBatchingUtility.Combine
+    // rewrites each MeshFilter.sharedMesh to point into the shared combined buffer. MeshColliders must
+    // use these originals for collision/click-to-inspect; the combined buffer would give every piece
+    // the geometry of the whole scene. Populated by ServerGET/CustomManager; survives the scene change
+    // because the geometry lives under the DontDestroyOnLoad "Scene" object.
+    public static Dictionary<GameObject, Mesh> originalMeshes = new Dictionary<GameObject, Mesh>();
+
     private static Dictionary<GameObject, UnityEngine.Color> originalColors = new Dictionary<GameObject, UnityEngine.Color>();
 
     // Global dictionary to store original materials
@@ -138,9 +145,13 @@ public class TrackAnalyser : MonoBehaviour
         {
             if (geometry.transform.GetChild(i).gameObject.activeSelf && !edep_bypiece.ContainsKey(geometry.transform.GetChild(i).gameObject))
             {
-                edep_bypiece[geometry.transform.GetChild(i).gameObject] = new List<double>();
-                geometry.transform.GetChild(i).AddComponent<MeshCollider>();
-                geometry.transform.GetChild(i).GetComponent<MeshCollider>().convex = true;
+                GameObject piece = geometry.transform.GetChild(i).gameObject;
+                edep_bypiece[piece] = new List<double>();
+                MeshCollider addedCollider = piece.AddComponent<MeshCollider>();
+                // Use the pre-batch original mesh; MeshFilter.sharedMesh may now be the combined buffer.
+                if (originalMeshes.TryGetValue(piece, out Mesh originalMesh))
+                    addedCollider.sharedMesh = originalMesh;
+                addedCollider.convex = true;
             }
         }
 
@@ -178,6 +189,9 @@ public class TrackAnalyser : MonoBehaviour
             if (tempCollider == null)
             {
                 tempCollider = temp.AddComponent<MeshCollider>();
+                // Use the pre-batch original mesh; MeshFilter.sharedMesh may now be the combined buffer.
+                if (originalMeshes.TryGetValue(temp, out Mesh originalMesh))
+                    tempCollider.sharedMesh = originalMesh;
                 tempCollider.convex = true;
             }
             if (!tempCollider.enabled)
@@ -457,6 +471,12 @@ public class TrackAnalyser : MonoBehaviour
         {
             // --- Switching TO Edep scene ---
 
+            // Edep mode recolors individual pieces on their real MeshRenderers, which the instanced drawer
+            // can't express (it draws all instances of a mesh with one shared material). Hand rendering back
+            // to the real renderers for the duration of the analysis.
+            if (InstancedGeometryDrawer.Active != null)
+                InstancedGeometryDrawer.Active.SetInstancingActive(false);
+
             originalMaterials.Clear();
 
             // deactivate NN algorithm for as long as in EDEP mode
@@ -512,6 +532,10 @@ public class TrackAnalyser : MonoBehaviour
             // reactivate NN algorithm
 
             NBS_instance.overriden = false;
+
+            // Return rendering to the fast instanced drawer now that per-piece coloring is no longer needed.
+            if (InstancedGeometryDrawer.Active != null)
+                InstancedGeometryDrawer.Active.SetInstancingActive(true);
 
             // Update Scene button label
             SceneSwitchButton = GameObject.Find("EButton");

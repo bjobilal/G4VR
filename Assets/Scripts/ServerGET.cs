@@ -312,7 +312,28 @@ public class ServerGET : MonoBehaviour
                 return;
             }
 
-            Geometry.transform.GetChild(0).gameObject.SetActive(false);
+            // Post-import render optimization. The geometry is thousands of pieces built from only a handful
+            // of meshes/materials. Disable shadows and cache each piece's original mesh (for TrackAnalyser's
+            // per-piece colliders), then hand rendering to InstancedGeometryDrawer, which collapses the scene
+            // to ~a dozen instanced draw calls. Built-in RP's automatic batchers won't do this (auto-instancing
+            // fragments on sort order; runtime static batching didn't register and would balloon memory).
+            TrackAnalyser.originalMeshes.Clear();
+            foreach (MeshRenderer mr in Geometry.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                mr.receiveShadows = false;
+                MeshFilter mf = mr.GetComponent<MeshFilter>();
+                if (mf != null && mf.sharedMesh != null)
+                    TrackAnalyser.originalMeshes[mr.gameObject] = mf.sharedMesh;
+            }
+
+            GameObject modelRoot = Geometry.transform.GetChild(0).gameObject;
+            InstancedGeometryDrawer drawer = modelRoot.GetComponent<InstancedGeometryDrawer>();
+            if (drawer == null)
+                drawer = modelRoot.AddComponent<InstancedGeometryDrawer>();
+            drawer.Build(modelRoot);
+
+            modelRoot.SetActive(false);
             loadingBar.value = 1f;
             statusText.text = "Model loaded.";
             loadStatus = true;
