@@ -59,7 +59,13 @@ public class ServerGET : MonoBehaviour
     void Start()
     {
         loadStatus = false;
-        try { GameObject obj = GameObject.Find("Scene"); if (obj.transform.childCount > 0) { for (int i = 0; i < obj.transform.childCount; i++) { Destroy(obj.transform.GetChild(i).gameObject); } } } catch { }
+
+        // Returning to the menu from an analysis scene: drop the previous experiment entirely before
+        // the user picks the next one. ReleaseEverything also unloads the now-orphaned meshes and
+        // textures, which the old loop here never did -- so a second experiment was loaded on top of
+        // the first one's assets rather than in place of them. (The old loop also skipped every other
+        // child, since it indexed forward while destroying.)
+        SessionMemory.ReleaseEverything();
     }
 
     // Step 1: Request a new user session from the server
@@ -239,7 +245,13 @@ public class ServerGET : MonoBehaviour
             GameManager.instance.URL = URL;
 
             await LoadGLB(URL + $"{name}.glb");
-            
+
+            // Pull every run binary now, while the user is already watching a loading screen. The runs
+            // are the slow half of the load, and fetching them on demand inside the Custom scene meant
+            // a full download stall every time the carousel changed run. A failure here is not fatal:
+            // RunManager falls back to downloading a missing run on demand, exactly as before.
+            if (loadStatus) await PrefetchRuns(URL);
+
             if (loadStatus) SceneManager.LoadScene("Custom");
             else
             {
@@ -370,6 +382,66 @@ public class ServerGET : MonoBehaviour
             await Task.Delay(2000);
             
         }
+    }
+
+    // Downloads all of this address's run binaries into RunCache, driving the same loading bar the
+    // geometry download used. Runs stream straight to disk, so this costs storage, not headset RAM.
+    private async Task PrefetchRuns(string parentURL)
+    {
+        statusText.text = "Finding runs...";
+        loadingBar.value = 0f;
+
+        // Drop any previous address's run list first: if this listing fails we must fall back to
+        // asking the server from inside the scene, not silently reuse a count from another server.
+        RunCache.SetKnownRuns(null);
+
+        int[] runs = await RunCache.ListRuns(parentURL);
+
+        if (runs == null)
+        {
+            // Listing failed. Leave KnownRuns unset so RunManager asks the server itself in-scene.
+            Debug.LogWarning("[SERVER-GET] Could not list runs; they will be fetched on demand instead.");
+            return;
+        }
+
+        if (runs.Length == 0)
+        {
+            Debug.LogWarning("[SERVER-GET] No run*.bin files found at this address.");
+            RunCache.SetKnownRuns(runs);
+            return;
+        }
+
+        RunCache.Prepare(parentURL);
+
+        int failed = 0;
+        for (int i = 0; i < runs.Length; i++)
+        {
+            int runNumber = runs[i];
+            float start = i / (float)runs.Length;
+            float span = 1f / runs.Length;
+
+            statusText.text = $"Downloading run {i + 1} of {runs.Length}...";
+
+            string path = await RunCache.Fetch(parentURL, runNumber,
+                p => loadingBar.value = start + Mathf.Clamp01(p) * span);
+
+            if (path == null)
+                failed++;
+
+            loadingBar.value = start + span;
+        }
+
+        RunCache.SetKnownRuns(runs);
+
+        long megabytes = RunCache.CachedBytes(parentURL) / (1024 * 1024);
+        Debug.Log($"[SERVER-GET] Cached {runs.Length - failed}/{runs.Length} runs ({megabytes} MB on disk).");
+
+        loadingBar.value = 1f;
+        statusText.text = failed == 0
+            ? $"{runs.Length} run(s) ready."
+            : $"{runs.Length - failed} of {runs.Length} run(s) ready.";
+
+        await Task.Delay(500);
     }
 
     private static void TryDeleteFile(string path)

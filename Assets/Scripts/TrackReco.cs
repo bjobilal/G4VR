@@ -43,7 +43,14 @@ public class NewBehaviourScript : MonoBehaviour
     public static List<Matrix4x4> markerMatrices = new List<Matrix4x4>();
     bool drawMeshes = true;
 
-    List<string> stringTable = new List<string>(); // LUT for binary
+    // Run-scoped string table shared by every Track. The binary format already ships one (each step
+    // references a name by a ushort index into it), and the CSV reader interns into the same table, so
+    // no Track ever stores per-step strings of its own -- see Track.ProcessAt / Track.VolumeAt.
+    public static string[] stringTable = System.Array.Empty<string>();
+
+    // Interning state, alive only while a file is being parsed; dropped by FinishStringTable().
+    private static Dictionary<string, ushort> stringIds;
+    private static List<string> stringScratch;
 
     public static List<GameObject> tracks = new List<GameObject>();
     // Inner key is (eventID << 32 | trackID), NOT trackID alone: GEANT4 restarts trackID at 1 for
@@ -56,23 +63,69 @@ public class NewBehaviourScript : MonoBehaviour
     public static bool hasVolumeInfo = false;
     public double time_scale;
     private Dictionary<Track, double> orderedtime = new Dictionary<Track, double>();
-    public Dictionary<string, List<GameObject>> time_control = new Dictionary<string, List<GameObject>>(); // string is time and list<gameobject> is all the tracks which appear at that time.
+    // NOTE: the old `time_control` (Dictionary<string, List<GameObject>> keyed by time.ToString())
+    // used to live here. It cost one heap string + one List object per unique step time -- millions of
+    // each on a large run -- and drove nothing visible, since the objects it toggled are the invisible
+    // per-step colliders. Time slicing is owned by TrackMeshRenderer, which indexes a sorted segment
+    // array directly; SimTracks/SteppedTracks now go through it.
     //private static Dictionary<int, List<Vector3>> trackPoints = new Dictionary<int, List<Vector3>>();
 
     public static List<ColliderEntry> colliders = new List<ColliderEntry>();
 
     // SETTINGS AND STATES TO MANAGE COLLIDERS
 
-    public int maxActive = 1000;
-    public float recomputeInterval = 5f;
-    public float activateRadius = 2.0f;
-    public float releaseRadius = 2.5f;
+    // Raised well above the old 1000 / 2.0 / 2.5 / 5s now that Recompute no longer scans every segment
+    // in the run on every tick (see BuildColliderGrid). The limiting factor is no longer the search but
+    // the number of live XRSimpleInteractables, so maxActive is the knob to turn if the headset
+    // struggles -- the radii only decide how far ahead tracks become grabbable.
+    public int maxActive = 5000;
+    public float recomputeInterval = 1.5f;
+    public float activateRadius = 6.0f;
+    public float releaseRadius = 7.5f;
+    // Debug escape hatch: activates EVERY segment collider at once. Do not turn this on for a real
+    // run -- it means millions of active GameObjects, each with a Rigidbody, a CapsuleCollider and an
+    // XRSimpleInteractable that the XR Interaction Manager then walks every frame. Edep mode used to
+    // set it; it now calls SuspendTrackColliders instead.
     public bool overriden = false;
+
+    // While true the proximity system is parked and no segment collider is active at all.
+    private bool trackCollidersSuspended = false;
 
 
     private HashSet<int> activeSet = new HashSet<int>();
     private HashSet<int> nextActiveSet = new HashSet<int>();
     private float timer;
+
+    // --- spatial index over the track colliders ---------------------------------------------------
+    // Recompute used to test the camera against every segment in the run -- millions of point-to-segment
+    // distances -- on every tick. That cost is what kept activateRadius and maxActive pinned low, and it
+    // arrived as a visible hitch every recomputeInterval seconds.
+    //
+    // Tracks are bucketed into a uniform grid once at load, so a tick only visits the handful of cells
+    // around the camera. Indexing is per *track*, not per segment: a track's segments are contiguous in
+    // `colliders` (DrawTrack appends them in one run), and a track covers far fewer cells than its
+    // segments do individually, so the index is ~10x smaller for the same effect.
+    //
+    // The grid lives in the scale root's local space -- the same space Recompute compares in -- so the
+    // user scale slider never invalidates it.
+    private struct TrackRange { public int first, count; }
+    private struct OversizedTrack { public int track; public Vector3 min, max; }
+
+    // A track spanning more cells than this is held aside and tested against its bounding box instead,
+    // so one stray long-flying particle cannot smear itself across the whole grid.
+    private const int MaxCellsPerTrack = 128;
+
+    private float gridCellSize = 1f;
+    private readonly Dictionary<long, int> gridBuckets = new Dictionary<long, int>(); // cell key -> bucket
+    private int[] gridBucketStart = System.Array.Empty<int>();                        // CSR offsets, buckets + 1
+    private int[] gridEntries = System.Array.Empty<int>();                            // indices into gridTracks
+    private readonly List<TrackRange> gridTracks = new List<TrackRange>();
+    private readonly List<OversizedTrack> gridOversized = new List<OversizedTrack>();
+
+    // Visit stamps, so a track reachable through several cells is only considered once per query.
+    private int[] gridStamp = System.Array.Empty<int>();
+    private int gridStampCounter;
+    private readonly List<int> gridQueryResult = new List<int>();
 
     List<Track> trackInstances = new List<Track>();
     //private Vector3 fixedStartPoint = new Vector3(0, -63.5f, -127f);
@@ -92,8 +145,6 @@ public class NewBehaviourScript : MonoBehaviour
     public GameObject Controls;
     public GameObject Menus;
 
-    List<string> sortedKeys; // of time_control
-    
     HashSet<string> particles_in_scene = new HashSet<string>();
 
 
@@ -112,12 +163,133 @@ public class NewBehaviourScript : MonoBehaviour
     public float checkedScale = 1f;
     public bool appliedScaleToGeometry = false;
 
+    // ---- User-controlled scale (the "Scale" slider) ----------------------------------------------------
+    // Discrete log-scale values; index 3 == 1.0 is the default (no change from current behaviour).
+    public static readonly float[] userScaleValues = { 0.001f, 0.01f, 0.1f, 1f, 10f };
+    // Static so it survives run switches (a new track_renderer clone is instantiated per run).
+    public static int userScaleIndex = 3;
+    // Shared parent that holds the geometry ("Scene"), this track-renderer clone (with the unified track
+    // mesh) and every track's collider GameObject, so they all scale together about the origin. Its
+    // localScale is the user scale, multiplied on top of the auto-fit checkedScale (which stays on the
+    // geometry's own localScale and is baked into track positions). DontDestroyOnLoad, like the geometry.
+    public static Transform scaleRoot;
+    // The "Scale" slider itself (cloned from the time slider at runtime, Custom scene only).
+    public Slider scale_controller;
+
+    // The "Scale : Nx" readout above that slider, and the value it currently shows (NaN = never drawn).
+    private const string ScaleLabelName = "ScaleLabel";
+
+    // Points added on top of whatever the surrounding panel labels use, so the scale readout reads
+    // clearly at arm's length in the headset.
+    private const float ScaleLabelFontBoost = 6f;
+    private TextMeshProUGUI scaleLabel;
+    private float lastLabelledScale = float.NaN;
+
+    // The scale the experiment is actually displayed at: the auto-fit factor chosen from the data's
+    // own coordinate magnitudes (checkedScale) times the slider's multiplier. The slider position alone
+    // would be misleading -- with an auto-fit of 0.01 and the slider at 10x, the experiment is being
+    // shown at 0.1x, not 10x.
+    public float TotalScale => checkedScale * userScaleValues[userScaleIndex];
+
     // warning in case CSV could not be fully read or understood:
     bool csvWarning = false;
 
-    string GetString(ushort id)
+    // Drops everything belonging to the currently-loaded run: the per-step arrays (the bulk of the
+    // memory), the collider bookkeeping and the string table. Safe to call when nothing is loaded.
+    public static void ReleaseRunData()
     {
-        return (id < stringTable.Count) ? stringTable[id] : "";
+        foreach (var typeEntry in trackInfo)
+        {
+            foreach (var track in typeEntry.Value.Values)
+            {
+                // Destroy before releasing: ReleaseStepData nulls trackObj, so anything still standing
+                // (a scene torn down without going through RunManager) would be orphaned otherwise.
+                if (track.trackObj != null)
+                    Destroy(track.trackObj);
+
+                track.ReleaseStepData();
+            }
+        }
+
+        trackInfo.Clear();
+        tracks.Clear();
+        colliders.Clear();
+        colliders.TrimExcess();
+        markerMatrices.Clear();
+        markerMatrices.TrimExcess();
+
+        stringTable = System.Array.Empty<string>();
+        stringIds = null;
+        stringScratch = null;
+        hasVolumeInfo = false;
+    }
+
+    // Full teardown for leaving an analysis scene entirely. On top of the run data this drops the
+    // statics that would otherwise survive into the next scene: the scale root (a destroyed Transform),
+    // the leaked line material, and the user's scale choice, which is only meaningful within a run.
+    public static void ResetStaticState()
+    {
+        ReleaseRunData();
+
+        scaleRoot = null;
+        userScaleIndex = 3;
+
+        if (movieTrailMaterial != null)
+        {
+            Destroy(movieTrailMaterial);
+            movieTrailMaterial = null;
+        }
+
+        if (lineMaterial != null)
+        {
+            Destroy(lineMaterial);
+            lineMaterial = null;
+        }
+    }
+
+    // --- run-scoped string interning -------------------------------------------------------------
+
+    private static void BeginStringTable()
+    {
+        stringIds = new Dictionary<string, ushort>();
+        stringScratch = new List<string>();
+    }
+
+    // Returns a stable ushort id for `value`, adding it to the table on first sight. Used by the CSV
+    // reader; the binary reader gets its table verbatim from the file instead.
+    private static ushort InternString(string value)
+    {
+        value = value ?? "";
+        if (stringIds.TryGetValue(value, out ushort existing))
+            return existing;
+
+        if (stringScratch.Count > ushort.MaxValue)
+        {
+            UnityEngine.Debug.LogWarning($"[NEW-BEHAVIOUR-SCRIPT] String table exceeded {ushort.MaxValue} entries; '{value}' will be reported as unknown.");
+            return 0;
+        }
+
+        ushort id = (ushort)stringScratch.Count;
+        stringScratch.Add(value);
+        stringIds[value] = id;
+        return id;
+    }
+
+    private static void FinishStringTable()
+    {
+        stringTable = stringScratch != null ? stringScratch.ToArray() : System.Array.Empty<string>();
+        stringIds = null;
+        stringScratch = null;
+    }
+
+    // Resolves ids[i] against the run's string table. Returns "" for a missing/out-of-range entry
+    // rather than throwing, since a malformed file should degrade to a blank label, not a crash.
+    public static string LookupString(ushort[] ids, int i)
+    {
+        if (ids == null || i < 0 || i >= ids.Length)
+            return "";
+        ushort id = ids[i];
+        return id < stringTable.Length ? stringTable[id] : "";
     }
 
     IEnumerator waiting()
@@ -134,10 +306,10 @@ public class NewBehaviourScript : MonoBehaviour
 
         // Set  up the scene 
 
-        trackInfo.Clear();
-        tracks.Clear();
-        markerMatrices.Clear();
-        colliders.Clear();
+        // Release the outgoing run before reading the next one, so the two never coexist in memory.
+        // (Clearing the dictionary alone is not enough: RunManager may still be holding Track objects
+        // while it tears down their GameObjects.)
+        ReleaseRunData();
         hasVolumeInfo = false; // set true by ReadBIN if this run actually carries per-step volume IDs
 
         //time = GameObject.Find("Time");
@@ -160,6 +332,10 @@ public class NewBehaviourScript : MonoBehaviour
         Shader shader = Shader.Find("Standard");
         string fileName = @$"C:\Users\uclav\Documents\B's Sandbox\G4VR\Assets\{name}\{name}_tracks.csv";
         string filePath = System.IO.Path.Combine(UnityEngine.Application.streamingAssetsPath, fileName);
+        // Renderer.material hands back a *new* instance each time it is read, and a run switch builds a
+        // fresh track_renderer clone, so the previous instance has to be destroyed or it is stranded.
+        if (lineMaterial != null)
+            Destroy(lineMaterial);
         lineMaterial = GameObject.Find("line_mat").GetComponent<Renderer>().material;
         lineMaterial.shader = shader;
         lineMaterial.EnableKeyword("_EMISSION");
@@ -167,15 +343,17 @@ public class NewBehaviourScript : MonoBehaviour
         // read csv and draw tracks
         if (SceneManager.GetActiveScene().name == "Custom" || file == null)
         { 
+            // Note: the file is NOT deleted after reading any more. It lives in RunCache, which is what
+            // lets a second visit to the same run skip the download entirely; RunCache.Prepare evicts
+            // the previous address's files, so this does not grow without bound.
             ReadBIN(customFile, true);
-            if (File.Exists(customFile))
-                File.Delete(customFile);
-
         }
         else
             ReadCSV(file, true);
 
         DrawTracks(1f);
+
+        BuildColliderGrid();
 
 
         // additional functions (if any)
@@ -189,8 +367,59 @@ public class NewBehaviourScript : MonoBehaviour
         {
             UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] Configuring settings for Custom scene");
             configureSettings();
+
+            // Set up the "Scale" slider's shared root: this track-renderer clone (with the track mesh) and all
+            // track colliders go under it; the geometry is scaled to match directly in Update(). Together the
+            // slider resizes the whole experiment uniformly.
+            EnsureScaleRoot();
+            ReparentIntoScaleRoot();
         }
-        
+
+    }
+
+    // Creates (once per Custom-scene load) the shared scale root for the tracks. It is intentionally
+    // scene-scoped (NOT DontDestroyOnLoad): the track-renderer clone and track colliders parented under it
+    // must die with the scene. The geometry ("Scene") is DontDestroyOnLoad and is NOT reparented -- instead
+    // Update() scales it directly by checkedScale * userScale, which keeps the geometry<->track relative
+    // scale identical while avoiding the lifetime pitfalls of reparenting a persistent object under a
+    // scene-scoped one. A run switch (same scene) reuses this root; new clones re-parent into it.
+    private void EnsureScaleRoot()
+    {
+        if (scaleRoot == null)
+        {
+            GameObject existing = GameObject.Find("WorldScaleRoot");
+            scaleRoot = existing != null ? existing.transform : new GameObject("WorldScaleRoot").transform;
+        }
+
+        scaleRoot.localScale = Vector3.one * userScaleValues[userScaleIndex];
+    }
+
+    // Parents this clone (carrying the unified track mesh) and every track's collider GameObject under the
+    // scale root. worldPositionStays=false preserves the baked local positions, so colliders stay coincident
+    // with the mesh vertices once the root scales them.
+    private void ReparentIntoScaleRoot()
+    {
+        if (scaleRoot == null)
+            return;
+
+        transform.SetParent(scaleRoot, false);
+
+        foreach (var typeEntry in trackInfo)
+            foreach (var track in typeEntry.Value)
+                if (track.Value.trackObj != null && track.Value.trackObj.transform.parent != scaleRoot)
+                    track.Value.trackObj.transform.SetParent(scaleRoot, false);
+    }
+
+    // Called by the Scale slider. Applies the discrete user scale to the shared root; the k-nearest collider
+    // search reads positions in root-local space (see Recompute), so its effective world radius tracks this
+    // scale automatically -- no separate radius adjustment needed.
+    public void SetUserScale(int index)
+    {
+        userScaleIndex = Mathf.Clamp(index, 0, userScaleValues.Length - 1);
+        if (scaleRoot != null)
+            scaleRoot.localScale = Vector3.one * userScaleValues[userScaleIndex];
+
+        UpdateScaleLabel();
     }
 
     private void Update()
@@ -198,18 +427,27 @@ public class NewBehaviourScript : MonoBehaviour
         GameObject Geometry = GameObject.Find("Scene");
         if (Geometry != null)
         {
-            Geometry.transform.localScale = new Vector3(checkedScale, checkedScale, checkedScale);
+            // Auto-fit scale (checkedScale) times the user-chosen scale. The tracks live under scaleRoot
+            // (localScale = userScale) and their vertices are baked with checkedScale, so applying the same
+            // product here keeps the geometry and tracks at an identical, invariant relative scale.
+            float geometryScale = checkedScale * userScaleValues[userScaleIndex];
+            Geometry.transform.localScale = new Vector3(geometryScale, geometryScale, geometryScale);
             //appliedScaleToGeometry = true;
             //UnityEngine.Debug.Log("[NewBehaviourScript] set scene scale to "+checkedScale);
         }
         //else 
         //UnityEngine.Debug.Log("[NewBehaviourScript] Could not find Scene");
 
-        timer += Time.deltaTime;
-        if (timer >= recomputeInterval)
+        UpdateScaleLabel();
+
+        if (!trackCollidersSuspended)
         {
-            timer = 0f;
-            Recompute(overriden);
+            timer += Time.deltaTime;
+            if (timer >= recomputeInterval)
+            {
+                timer = 0f;
+                Recompute(overriden);
+            }
         }
 
         if (movieClockRunning)
@@ -266,6 +504,17 @@ public class NewBehaviourScript : MonoBehaviour
             int fallbackEventIndex = 0;
             bool sawFirstTrack = false;
 
+            minT = double.PositiveInfinity;
+            maxT = double.NegativeInfinity;
+
+            // Reusable per-step read buffers. These used to be eleven fresh arrays per track, i.e. ~4.5
+            // million allocations on a 400k-track run, all of which had to be collected. They are grown
+            // to the largest step count seen and then reused for every subsequent track.
+            float[] x = null, y = null, z = null, time = null, edep = null;
+            float[] px = null, py = null, pz = null, energy = null;
+            ushort[] processID = null, volumeID = null;
+            int bufferCapacity = 0;
+
             for (int t = 0; t < trackCount; t++)
             {
                 int trackID = reader.ReadInt32();
@@ -296,17 +545,21 @@ public class NewBehaviourScript : MonoBehaviour
 
                 uint n = reader.ReadUInt32();
 
-                float[] x = new float[n];
-                float[] y = new float[n];
-                float[] z = new float[n];
-                float[] time = new float[n];
-                float[] edep = new float[n];
-                float[] px = new float[n];
-                float[] py = new float[n];
-                float[] pz = new float[n];
-                float[] energy = new float[n];
-                ushort[] processID = new ushort[n];
-                ushort[] volumeID = new ushort[n];
+                if (n > bufferCapacity)
+                {
+                    bufferCapacity = (int)n;
+                    x = new float[bufferCapacity];
+                    y = new float[bufferCapacity];
+                    z = new float[bufferCapacity];
+                    time = new float[bufferCapacity];
+                    edep = new float[bufferCapacity];
+                    px = new float[bufferCapacity];
+                    py = new float[bufferCapacity];
+                    pz = new float[bufferCapacity];
+                    energy = new float[bufferCapacity];
+                    processID = new ushort[bufferCapacity];
+                    volumeID = new ushort[bufferCapacity];
+                }
 
                 for (int i = 0; i < n; i++) x[i] = reader.ReadSingle();
                 for (int i = 0; i < n; i++) y[i] = reader.ReadSingle();
@@ -328,17 +581,11 @@ public class NewBehaviourScript : MonoBehaviour
 
                 bool colorByRGB = !(r == 0f && g == 0f && b == 0f);
 
-                Color trackColor;
-                if (colorByRGB)
-                {
-                    UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] (Binary) Setting track color by RGB");
-                    trackColor = new Color(r * 255f, g * 255f, b * 255f);
-                }
-                else
-                {
-                    UnityEngine.Debug.Log("[NEW-BEHAVIOUR-SCRIPT] (Binary) Setting track color by type");
-                    trackColor = GetColor(type);
-                }
+                // No logging here: this runs once per track, and a 400k-track run would emit 400k log
+                // lines, each with a captured stack trace (see m_StackTraceTypes in ProjectSettings).
+                Color trackColor = colorByRGB
+                    ? new Color(r * 255f, g * 255f, b * 255f)
+                    : GetColor(type);
 
                 if (!trackInfo.ContainsKey(type))
                 {
@@ -354,6 +601,7 @@ public class NewBehaviourScript : MonoBehaviour
                 }
 
                 Track tr = trackInfo[type][uniqueKey];
+                tr.BeginSteps((int)n); // exact capacity: the file tells us the step count up front
 
                 tr.type = type;
                 tr.particleName = pname;
@@ -387,45 +635,45 @@ public class NewBehaviourScript : MonoBehaviour
                     posZ *= checkedScale;
                     Vector3 position = new Vector3(posX, posY, posZ);
 
-                    double tracktime = time[i];
-                    double e = energy[i];
-                    double d = edep[i];
+                    float tracktime = time[i];
+                    float e = energy[i];
+                    float d = edep[i];
                     //UnityEngine.Debug.Log("EDEP value:"+ d);
 
                     if (tracktime < minT) minT = tracktime;
                     if (tracktime > maxT) maxT = tracktime;
 
-                    tr.positions.Add(position);
-                    tr.energies.Add(e);
-                    tr.times.Add(tracktime);
-                    tr.processIDs.Add(processID[i]);
-                    tr.volumeIDs.Add(volumeID[i]);
-                    tr.px.Add(px[i]);
-                    tr.py.Add(py[i]);
-                    tr.pz.Add(pz[i]);
-                    tr.edeps.Add(d);
+                    tr.AppendStep(position, tracktime, e, d, px[i], py[i], pz[i], processID[i], volumeID[i]);
                 }
+
+                // Freeze this track's steps immediately, so the growable lists for one track are the
+                // only scratch alive at any moment rather than the whole run's worth.
+                tr.Compact();
             }
 
-            List<string> stringTable = new List<string>();
-
-            for (int s = 0; s < stringCount; s++)
+            // The file's own string table becomes the run's table verbatim.
+            string[] table = new string[stringCount];
+            for (int sIdx = 0; sIdx < stringCount; sIdx++)
             {
                 ushort len = reader.ReadUInt16();
                 byte[] bytes = reader.ReadBytes(len);
-                stringTable.Add(System.Text.Encoding.UTF8.GetString(bytes));
+                table[sIdx] = System.Text.Encoding.UTF8.GetString(bytes);
             }
+            stringTable = table;
 
+            // Only the per-track particle name is materialised. The per-step process and volume names
+            // used to be expanded into two List<string> per track -- two more references per step on
+            // top of the ushort ids that already encode them. Track.ProcessAt/VolumeAt resolve those
+            // ids against the table on demand instead, which is what the UI needs anyway (one step at
+            // a time, on hover or click).
             foreach (var typeDict in trackInfo.Values)
             {
                 foreach (Track tr in typeDict.Values)
                 {
-                    tr.particleName = stringTable[tr.particleNameID];
+                    tr.particleName = tr.particleNameID < stringTable.Length
+                        ? stringTable[tr.particleNameID]
+                        : "";
                     particles_in_scene.Add(tr.particleName);
-                    foreach (ushort id in tr.processIDs)
-                        tr.processes.Add(stringTable[id]);
-                    foreach (ushort id in tr.volumeIDs)
-                        tr.volumeNames.Add(stringTable[id]);
                 }
             }
 
@@ -433,29 +681,18 @@ public class NewBehaviourScript : MonoBehaviour
             Debug.Log("Finished reading BIN file.");
         }
 
-        foreach (var typeEntry in trackInfo)
+        // The run's time range comes straight from the minT/maxT accumulated while parsing. It used to
+        // be recovered by string-sorting millions of stringified step times -- which is what forced
+        // time_control to exist at all. (The old `tracks.Add(tval.trackObj)` here also added nothing but
+        // nulls, since trackObj is not created until DrawTracks runs; that list is filled there now.)
+        if (double.IsInfinity(minT) || double.IsInfinity(maxT))
         {
-            foreach (var kv in typeEntry.Value)
-            {
-                var tval = kv.Value;
-
-                foreach (var ti in tval.times)
-                {
-                    if (!time_control.ContainsKey(ti.ToString()))
-                        time_control[ti.ToString()] = new List<GameObject>();
-                }
-
-                tracks.Add(tval.trackObj); // keep list of all track GameObjects
-            }
+            minT = 0.0;
+            maxT = 0.0;
         }
 
-        sortedKeys = time_control.Keys.OrderBy(key => key).ToList();
-
-        Debug.Log($"Sorted Keys length: {sortedKeys.Count}");
-
-        // time slider details
-        stop_time.GetComponent<TextMeshProUGUI>().text = sortedKeys.Select(s => Convert.ToDouble(s)).Max().ToString();
-        start_time.GetComponent<TextMeshProUGUI>().text = sortedKeys.Select(s => Convert.ToDouble(s)).Min().ToString();
+        stop_time.GetComponent<TextMeshProUGUI>().text = maxT.ToString();
+        start_time.GetComponent<TextMeshProUGUI>().text = minT.ToString();
         status.transform.GetComponent<TextMeshProUGUI>().text = "Complete";
         status.transform.GetComponent<TextMeshProUGUI>().color = Color.green;
 
@@ -482,12 +719,15 @@ public class NewBehaviourScript : MonoBehaviour
         // track/hit , ID, particle, charge, step, x, y, z, time of step, edep, process, px, py, pz, energy, R, G, B  
         string[] lines = Regex.Split(file.text, "\r\n|\r|\n");
         bool headerSkipped = false;
-        maxT = 0.0;
-        minT = 99999999999999999999999999999.0;
+        maxT = double.NegativeInfinity;
+        minT = double.PositiveInfinity;
+
+        // The CSV carries process/particle names as text on every row. Interning them into the same
+        // ushort-indexed table the binary format uses means a Track stores 2 bytes per step instead of
+        // an 8-byte reference (plus the string itself, freshly allocated by Split on every single row).
+        BeginStringTable();
 
         float T_range = 1f;
-
-        double logMinT = Math.Log10(maxT - minT + 1);
 
         foreach (string line in lines)
         {
@@ -533,10 +773,9 @@ public class NewBehaviourScript : MonoBehaviour
                     double time = ParseHelper.ParseTime(values[8]);
                     string pname = values[2];
 
-                    double px = float.Parse(values[11], CultureInfo.InvariantCulture);
-
-                    double py = float.Parse(values[12], CultureInfo.InvariantCulture);
-                    double pz = float.Parse(values[13], CultureInfo.InvariantCulture);
+                    float px = float.Parse(values[11], CultureInfo.InvariantCulture);
+                    float py = float.Parse(values[12], CultureInfo.InvariantCulture);
+                    float pz = float.Parse(values[13], CultureInfo.InvariantCulture);
 
                     // COLORING 
                     bool colorByRGB = false;
@@ -580,18 +819,19 @@ public class NewBehaviourScript : MonoBehaviour
                         //Debug.Log("HELLO: initialized track");
                         trackInstances.Add(trackInfo[type][trackID]);
                     }
-                    trackInfo[type][trackID].positions.Add(position);
-                    trackInfo[type][trackID].energies.Add(energy);
-                    trackInfo[type][trackID].times.Add(time);
-                    trackInfo[type][trackID].type = type;
-                    trackInfo[type][trackID].particleName = pname;
-                    trackInfo[type][trackID].processes.Add(process);
-                    trackInfo[type][trackID].px.Add(px);
-                    trackInfo[type][trackID].py.Add(py);
-                    trackInfo[type][trackID].pz.Add(pz);
-                    trackInfo[type][trackID].edeps.Add(edep);
-                    trackInfo[type][trackID].colorByRGB = colorByRGB;
-                    trackInfo[type][trackID].color = trackColor;
+
+                    Track csvTrack = trackInfo[type][trackID];
+                    csvTrack.type = type;
+                    csvTrack.particleName = pname;
+                    csvTrack.particleNameID = InternString(pname);
+                    csvTrack.colorByRGB = colorByRGB;
+                    csvTrack.color = trackColor;
+
+                    // volumeID 0: the CSV format has no per-step volume column, which is why
+                    // hasVolumeInfo stays false for the example scenes and TrackAnalyser falls back to
+                    // its collider-overlap edep accounting.
+                    csvTrack.AppendStep(position, (float)time, (float)energy, (float)edep,
+                                        px, py, pz, InternString(process), 0);
 
                     particles_in_scene.Add(pname);
                     //Debug.Log("Track Info Count " + trackInfo.Count);
@@ -609,29 +849,25 @@ public class NewBehaviourScript : MonoBehaviour
         //time_scale = 10.0f / (maxT - minT); // this needs an associated slider. 
         //Debug.Log("trackinfo length: " + trackInfo.Count);
 
-        foreach (var typeEntry in trackInfo)
+        FinishStringTable();
+
+        // Steps arrived interleaved across tracks, so freezing has to wait until the whole file is read.
+        foreach (var typeDict in trackInfo.Values)
+            foreach (Track tr in typeDict.Values)
+                tr.Compact();
+
+        // The run's time range comes straight from the minT/maxT accumulated while parsing. It used to
+        // be recovered by string-sorting millions of stringified step times -- which is what forced
+        // time_control to exist at all. (The old `tracks.Add(tval.trackObj)` here also added nothing but
+        // nulls, since trackObj is not created until DrawTracks runs; that list is filled there now.)
+        if (double.IsInfinity(minT) || double.IsInfinity(maxT))
         {
-            foreach (var kv in typeEntry.Value)
-            {
-                var tval = kv.Value;
-
-                foreach (var ti in tval.times)
-                {
-                    if (!time_control.ContainsKey(ti.ToString()))
-                        time_control[ti.ToString()] = new List<GameObject>();
-                }
-
-                tracks.Add(tval.trackObj); // keep list of all track GameObjects
-            }
+            minT = 0.0;
+            maxT = 0.0;
         }
 
-        sortedKeys = time_control.Keys.OrderBy(key => key).ToList();
-
-        Debug.Log($"Sorted Keys length: {sortedKeys.Count}");
-
-        // time slider details
-        stop_time.GetComponent<TextMeshProUGUI>().text = sortedKeys.Select(s => Convert.ToDouble(s)).Max().ToString();
-        start_time.GetComponent<TextMeshProUGUI>().text = sortedKeys.Select(s => Convert.ToDouble(s)).Min().ToString();
+        stop_time.GetComponent<TextMeshProUGUI>().text = maxT.ToString();
+        start_time.GetComponent<TextMeshProUGUI>().text = minT.ToString();
         status.transform.GetComponent<TextMeshProUGUI>().text = "Complete";
         status.transform.GetComponent<TextMeshProUGUI>().color = Color.green;
 
@@ -661,20 +897,246 @@ public class NewBehaviourScript : MonoBehaviour
         public GameObject obj;    // reference to actual collider
     }
 
+    // Buckets every track that produced collider segments into the uniform grid. Runs once per loaded
+    // run, straight after DrawTracks, and is what makes a larger activateRadius and maxActive affordable.
+    private void BuildColliderGrid()
+    {
+        gridBuckets.Clear();
+        gridTracks.Clear();
+        gridOversized.Clear();
+        gridBucketStart = System.Array.Empty<int>();
+        gridEntries = System.Array.Empty<int>();
+        gridStamp = System.Array.Empty<int>();
+        gridStampCounter = 0;
+
+        if (colliders.Count == 0)
+            return;
+
+        // One cell per activation radius, so a query touches a 3x3x3 neighbourhood.
+        gridCellSize = Mathf.Max(activateRadius, 0.01f);
+
+        List<Vector3> mins = new List<Vector3>();
+        List<Vector3> maxs = new List<Vector3>();
+
+        foreach (var typeEntry in trackInfo)
+        {
+            foreach (var track in typeEntry.Value.Values)
+            {
+                if (track.colliderCount <= 0 || track.positions.Length == 0)
+                    continue;
+
+                Vector3 min = track.positions[0];
+                Vector3 max = min;
+                for (int i = 1; i < track.positions.Length; i++)
+                {
+                    min = Vector3.Min(min, track.positions[i]);
+                    max = Vector3.Max(max, track.positions[i]);
+                }
+
+                gridTracks.Add(new TrackRange { first = track.firstColliderIndex, count = track.colliderCount });
+                mins.Add(min);
+                maxs.Add(max);
+            }
+        }
+
+        gridStamp = new int[gridTracks.Count];
+
+        // Pass 1: count how many tracks land in each cell, assigning bucket indices as cells appear.
+        List<int> bucketCounts = new List<int>();
+
+        for (int t = 0; t < gridTracks.Count; t++)
+        {
+            if (!TryCellRange(mins[t], maxs[t], out Vector3Int lo, out Vector3Int hi))
+            {
+                gridOversized.Add(new OversizedTrack { track = t, min = mins[t], max = maxs[t] });
+                continue;
+            }
+
+            for (int x = lo.x; x <= hi.x; x++)
+                for (int y = lo.y; y <= hi.y; y++)
+                    for (int z = lo.z; z <= hi.z; z++)
+                    {
+                        long key = CellKey(x, y, z);
+                        if (!gridBuckets.TryGetValue(key, out int bucket))
+                        {
+                            bucket = bucketCounts.Count;
+                            gridBuckets[key] = bucket;
+                            bucketCounts.Add(0);
+                        }
+
+                        bucketCounts[bucket]++;
+                    }
+        }
+
+        // Pass 2: prefix-sum the counts into CSR offsets -- one flat int[] rather than a List per
+        // occupied cell, which would mean an object per cell.
+        gridBucketStart = new int[bucketCounts.Count + 1];
+        for (int b = 0; b < bucketCounts.Count; b++)
+            gridBucketStart[b + 1] = gridBucketStart[b] + bucketCounts[b];
+
+        gridEntries = new int[gridBucketStart[bucketCounts.Count]];
+        int[] cursor = new int[bucketCounts.Count];
+
+        // Pass 3: fill. TryCellRange is deterministic, so oversized tracks skip out here too.
+        for (int t = 0; t < gridTracks.Count; t++)
+        {
+            if (!TryCellRange(mins[t], maxs[t], out Vector3Int lo, out Vector3Int hi))
+                continue;
+
+            for (int x = lo.x; x <= hi.x; x++)
+                for (int y = lo.y; y <= hi.y; y++)
+                    for (int z = lo.z; z <= hi.z; z++)
+                    {
+                        int bucket = gridBuckets[CellKey(x, y, z)];
+                        gridEntries[gridBucketStart[bucket] + cursor[bucket]++] = t;
+                    }
+        }
+
+        UnityEngine.Debug.Log($"[NBS][Grid] {gridTracks.Count} tracks / {colliders.Count} segments indexed into {bucketCounts.Count} cells (cell size {gridCellSize:0.###}); {gridOversized.Count} oversized.");
+    }
+
+    private int CellCoord(float v) => Mathf.FloorToInt(v / gridCellSize);
+
+    // False when the box covers more cells than MaxCellsPerTrack: the track is too spread out to bucket
+    // usefully and belongs in the oversized list instead.
+    private bool TryCellRange(Vector3 min, Vector3 max, out Vector3Int lo, out Vector3Int hi)
+    {
+        lo = new Vector3Int(CellCoord(min.x), CellCoord(min.y), CellCoord(min.z));
+        hi = new Vector3Int(CellCoord(max.x), CellCoord(max.y), CellCoord(max.z));
+
+        long cells = (long)(hi.x - lo.x + 1) * (hi.y - lo.y + 1) * (hi.z - lo.z + 1);
+        return cells > 0 && cells <= MaxCellsPerTrack;
+    }
+
+    // Packs a cell coordinate into one long: 21 bits per axis, biased so negatives stay positive. That
+    // covers +/-1,048,575 cells per axis, far beyond any detector's extent at a sane cell size.
+    private static long CellKey(int x, int y, int z)
+    {
+        const long Bias = 1L << 20;
+        const long Mask = (1L << 21) - 1;
+
+        long lx = (x + Bias) & Mask;
+        long ly = (y + Bias) & Mask;
+        long lz = (z + Bias) & Mask;
+
+        return (lx << 42) | (ly << 21) | lz;
+    }
+
+    // Collects every indexed track within `radius` of `center` (both in scale-root local space) into
+    // `result`, without duplicates.
+    private void GatherNearbyTracks(Vector3 center, float radius, List<int> result)
+    {
+        result.Clear();
+
+        if (gridTracks.Count == 0)
+            return;
+
+        gridStampCounter++;
+
+        int reach = Mathf.Max(1, Mathf.CeilToInt(radius / gridCellSize));
+        int cx = CellCoord(center.x);
+        int cy = CellCoord(center.y);
+        int cz = CellCoord(center.z);
+
+        for (int x = cx - reach; x <= cx + reach; x++)
+            for (int y = cy - reach; y <= cy + reach; y++)
+                for (int z = cz - reach; z <= cz + reach; z++)
+                {
+                    if (!gridBuckets.TryGetValue(CellKey(x, y, z), out int bucket))
+                        continue;
+
+                    for (int e = gridBucketStart[bucket]; e < gridBucketStart[bucket + 1]; e++)
+                    {
+                        int t = gridEntries[e];
+                        if (gridStamp[t] == gridStampCounter)
+                            continue;
+
+                        gridStamp[t] = gridStampCounter;
+                        result.Add(t);
+                    }
+                }
+
+        // Oversized tracks are few; test each against its bounding box.
+        float radiusSqr = radius * radius;
+        foreach (OversizedTrack o in gridOversized)
+        {
+            if (gridStamp[o.track] == gridStampCounter)
+                continue;
+
+            Vector3 closest = Vector3.Min(Vector3.Max(center, o.min), o.max);
+            if ((closest - center).sqrMagnitude > radiusSqr)
+                continue;
+
+            gridStamp[o.track] = gridStampCounter;
+            result.Add(o.track);
+        }
+    }
+
+    // Parks (or restarts) the proximity collider system.
+    //
+    // Track segment colliders exist only for hover/click inspection, which edep mode does not offer --
+    // it inspects geometry pieces instead. Edep mode used to express that by setting `overriden`, whose
+    // branch in Recompute ACTIVATES every segment GameObject in the run: millions of objects switched
+    // on, each registering an XRSimpleInteractable that the XR Interaction Manager then iterates every
+    // single frame. That was both the long stall on entering edep mode and the permanent lag after it.
+    //
+    // Suspending is nearly free: at most `maxActive` (1000) segments are ever active, so only those
+    // have to be switched off.
+    public void SuspendTrackColliders(bool suspend)
+    {
+        trackCollidersSuspended = suspend;
+
+        if (!suspend)
+        {
+            timer = recomputeInterval; // recompute on the next frame rather than up to 5s later
+            return;
+        }
+
+        foreach (int idx in activeSet)
+        {
+            if (idx >= 0 && idx < colliders.Count && colliders[idx].obj != null)
+                colliders[idx].obj.SetActive(false);
+        }
+
+        activeSet.Clear();
+        nextActiveSet.Clear();
+    }
+
+    // Single sweep that switches every segment collider off, for the one caller that has to turn them
+    // on in bulk: the CSV example scenes' collider-overlap edep accounting. Without this, those scenes
+    // would come out of LogEdep with every segment left active, which is exactly what suspending was
+    // meant to avoid.
+    public void ForceAllTrackCollidersOff()
+    {
+        for (int i = 0; i < colliders.Count; i++)
+            if (colliders[i].obj != null && colliders[i].obj.activeSelf)
+                colliders[i].obj.SetActive(false);
+
+        activeSet.Clear();
+        nextActiveSet.Clear();
+    }
+
     void Recompute(bool overriden = false)
     {
         if (!overriden)
         {
-            Vector3 camPos = player.position;
+            // Work in the scale root's local space: the stored seg.start/end are baked (root-local) positions,
+            // so comparing against the camera transformed into that space keeps activate/releaseRadius measured
+            // in the unscaled coordinate system. The effective *world* radius then scales with the user scale
+            // (shrinking the search as the experiment shrinks), which is the intended behaviour.
+            Vector3 camPos = scaleRoot != null ? scaleRoot.InverseTransformPoint(player.position) : player.position;
 
             float activateR2 = activateRadius * activateRadius;
             float releaseR2 = releaseRadius * releaseRadius;
 
             nextActiveSet.Clear();
 
+            // Release pass: bounded by maxActive, so this one can stay exhaustive.
             foreach (int idx in activeSet)
             {
                 var seg = colliders[idx];
+                if (seg.obj == null)
+                    continue;
 
                 float d2 = SqrDistancePointToSegment(
                     camPos,
@@ -692,23 +1154,36 @@ public class NewBehaviourScript : MonoBehaviour
                 }
             }
 
-            for (int i = 0; i < colliders.Count && nextActiveSet.Count < maxActive; i++)
+            // Acquire pass: only the segments of tracks the grid says are near the camera. This used to
+            // walk all `colliders` -- millions of point-to-segment tests every tick -- which is what
+            // made the whole scheme expensive and forced the small radius and low maxActive.
+            GatherNearbyTracks(camPos, activateRadius, gridQueryResult);
+
+            for (int q = 0; q < gridQueryResult.Count && nextActiveSet.Count < maxActive; q++)
             {
-                if (nextActiveSet.Contains(i))
-                    continue;
+                TrackRange range = gridTracks[gridQueryResult[q]];
+                int end = range.first + range.count;
 
-                var seg = colliders[i];
-
-                float d2 = SqrDistancePointToSegment(
-                    camPos,
-                    seg.start,
-                    seg.end
-                );
-
-                if (d2 <= activateR2)
+                for (int i = range.first; i < end && nextActiveSet.Count < maxActive; i++)
                 {
-                    seg.obj.SetActive(true);
-                    nextActiveSet.Add(i);
+                    if (nextActiveSet.Contains(i))
+                        continue;
+
+                    var seg = colliders[i];
+                    if (seg.obj == null)
+                        continue;
+
+                    float d2 = SqrDistancePointToSegment(
+                        camPos,
+                        seg.start,
+                        seg.end
+                    );
+
+                    if (d2 <= activateR2)
+                    {
+                        seg.obj.SetActive(true);
+                        nextActiveSet.Add(i);
+                    }
                 }
             }
 
@@ -748,8 +1223,147 @@ public class NewBehaviourScript : MonoBehaviour
         TrackAnalyser runningInstance = GetComponent<TrackAnalyser>();
 
         Button edepBtn = edepButton.GetComponent<Button>();
-        edepBtn.onClick.RemoveAllListeners(); 
+        edepBtn.onClick.RemoveAllListeners();
         edepBtn.onClick.AddListener(() => runningInstance.ModeSwitch(edepButton));
+
+        SetupScaleSlider();
+    }
+
+    // Clones the time slider (TSlider) into a "Scale" slider (SSlider) placed just below it, and wires it to
+    // the discrete user scale. Guarded so a run switch (which re-runs configureSettings on the new clone)
+    // reuses the existing slider instead of stacking duplicates.
+    private void SetupScaleSlider()
+    {
+        GameObject ssliderGO = GameObject.Find("SSlider");
+        if (ssliderGO == null)
+        {
+            GameObject tsliderGO = GameObject.Find("TSlider");
+            if (tsliderGO == null)
+            {
+                UnityEngine.Debug.LogWarning("[NEW-BEHAVIOUR-SCRIPT] TSlider not found; cannot create Scale slider.");
+                return;
+            }
+
+            ssliderGO = Instantiate(tsliderGO, tsliderGO.transform.parent);
+            ssliderGO.name = "SSlider";
+
+            // Place it directly below the time slider.
+            RectTransform trt = tsliderGO.GetComponent<RectTransform>();
+            RectTransform srt = ssliderGO.GetComponent<RectTransform>();
+            if (trt != null && srt != null)
+                srt.anchoredPosition = trt.anchoredPosition + new Vector2(0f, -(Mathf.Abs(trt.rect.height) + 20f));
+
+        }
+
+        scaleLabel = EnsureScaleLabel(ssliderGO);
+
+        scale_controller = ssliderGO.GetComponent<Slider>();
+        if (scale_controller == null)
+            return;
+
+        // Strip listeners copied from the time slider. RemoveAllListeners only clears runtime listeners, so
+        // also disable any inspector-wired (persistent) ones that Instantiate copied over, otherwise moving
+        // the Scale slider would also fire the time slider's callbacks.
+        scale_controller.onValueChanged.RemoveAllListeners();
+        for (int i = scale_controller.onValueChanged.GetPersistentEventCount() - 1; i >= 0; i--)
+            scale_controller.onValueChanged.SetPersistentListenerState(i, UnityEngine.Events.UnityEventCallState.Off);
+
+        scale_controller.wholeNumbers = true;
+        scale_controller.minValue = 0;
+        scale_controller.maxValue = userScaleValues.Length - 1;
+        scale_controller.value = userScaleIndex; // reflects the persisted choice across run switches
+        scale_controller.onValueChanged.AddListener(v => SetUserScale((int)v));
+
+        UpdateScaleLabel();
+    }
+
+    // Builds (or re-finds) the "Scale : Nx" readout sitting just above the Scale slider.
+    //
+    // It has to be built from scratch: TSlider is a plain UGUI slider with no TextMeshProUGUI anywhere
+    // in it, so the previous attempt to relabel an existing child silently did nothing. Font settings
+    // are copied from a label already on the same panel where one exists, so the readout matches the
+    // surrounding controls rather than guessing a size that may be wrong on a world-space VR canvas.
+    private TextMeshProUGUI EnsureScaleLabel(GameObject ssliderGO)
+    {
+        Transform existing = ssliderGO.transform.Find(ScaleLabelName);
+        if (existing != null)
+            return existing.GetComponent<TextMeshProUGUI>();
+
+        RectTransform sliderRect = ssliderGO.GetComponent<RectTransform>();
+        if (sliderRect == null)
+        {
+            UnityEngine.Debug.LogWarning("[NEW-BEHAVIOUR-SCRIPT] Scale slider has no RectTransform; skipping its label.");
+            return null;
+        }
+
+        GameObject labelGO = new GameObject(ScaleLabelName, typeof(RectTransform));
+        labelGO.transform.SetParent(ssliderGO.transform, false);
+
+        float height = Mathf.Max(Mathf.Abs(sliderRect.rect.height), 1f);
+
+        // Stretched across the slider's width, pivoted on its own bottom edge and anchored to the
+        // slider's top, so it sits immediately above the track at any slider size.
+        RectTransform rect = labelGO.GetComponent<RectTransform>();
+        rect.anchorMin = new Vector2(0f, 1f);
+        rect.anchorMax = new Vector2(1f, 1f);
+        rect.pivot = new Vector2(0.5f, 0f);
+        rect.sizeDelta = new Vector2(0f, height);
+        rect.anchoredPosition = new Vector2(0f, height * 0.25f);
+
+        TextMeshProUGUI label = labelGO.AddComponent<TextMeshProUGUI>();
+        label.alignment = TextAlignmentOptions.Left;
+        label.enableWordWrapping = false;
+        label.raycastTarget = false; // a readout only; must not steal XR ray hits from the slider
+
+        TextMeshProUGUI template = ssliderGO.transform.parent != null
+            ? ssliderGO.transform.parent.GetComponentInChildren<TextMeshProUGUI>(true)
+            : null;
+
+        if (template != null)
+        {
+            label.font = template.font;
+            label.fontSharedMaterial = template.fontSharedMaterial;
+            label.fontSize = template.fontSize + ScaleLabelFontBoost;
+            label.color = template.color;
+        }
+        else
+        {
+            label.fontSize = height * 0.7f + ScaleLabelFontBoost;
+            label.color = Color.white;
+        }
+
+        // The label box is sized from the slider, which can be shorter than the boosted text; let it
+        // overflow upward rather than shrink or clip.
+        label.overflowMode = TextOverflowModes.Overflow;
+
+        return label;
+    }
+
+    // Refreshed from Update(), so the readout is also correct when checkedScale is decided after the
+    // slider was built. Guarded on the value, so it is one float compare per frame in the steady state.
+    private void UpdateScaleLabel()
+    {
+        if (scaleLabel == null)
+            return;
+
+        float total = TotalScale;
+        if (!float.IsNaN(lastLabelledScale) && Mathf.Approximately(total, lastLabelledScale))
+            return;
+
+        lastLabelledScale = total;
+        scaleLabel.text = "Scale : " + FormatScale(total) + "x";
+    }
+
+    // Plain decimals where they stay readable (10, 1, 0.01, 0.001), scientific below that -- the
+    // auto-fit factor can already be 0.001, which the slider can take down to 1e-6.
+    private static string FormatScale(float value)
+    {
+        if (value >= 1f)
+            return value.ToString("0.###", CultureInfo.InvariantCulture);
+        if (value >= 0.001f)
+            return value.ToString("0.#####", CultureInfo.InvariantCulture);
+
+        return value.ToString("0.###E+0", CultureInfo.InvariantCulture);
     }
 
     private float checkScaleFromPosition(float val)
@@ -781,7 +1395,9 @@ public class NewBehaviourScript : MonoBehaviour
             var tracksByType = typeEntry.Value;
             foreach (var track in tracksByType)
             {
-                temp[track.Value] = track.Value.times[0]; 
+                if (track.Value.StepCount == 0)
+                    continue;
+                temp[track.Value] = track.Value.times[0];
             }
         }
 
@@ -797,7 +1413,9 @@ public class NewBehaviourScript : MonoBehaviour
             var tracksByType = typeEntry.Value;
             foreach (var track in tracksByType)
             {
-                track.Value.DrawTrack(time_control);
+                track.Value.DrawTrack();
+                if (track.Value.trackObj != null)
+                    tracks.Add(track.Value.trackObj); // real references, so teardown can destroy them
             }
         }
 
@@ -815,67 +1433,64 @@ public class NewBehaviourScript : MonoBehaviour
                 yield return new WaitForSeconds(waitTime);
 
             //Debug.Log($"Drawing {entry.Key.ID}");
-            entry.Key.DrawTrack(time_control); 
+            entry.Key.DrawTrack();
         }
     }
 
     //[DEPRECATED]
+    // Plays the run back by advancing the same time index the slider drives, so the unified track mesh
+    // reveals itself segment by segment.
+    //
+    // This used to walk time_control and SetActive the per-step collider GameObjects. Those have no
+    // renderer, so it changed nothing on screen; the only visible effect was the time/status readout.
     public async void SimTracks()
     {
+        TrackMeshRenderer meshRenderer = GetComponent<TrackMeshRenderer>();
+        if (meshRenderer == null)
+            return;
 
-        if (playButton.name == "Play")
-        {
-            playbool = true;
-            playButton.name = "Pause";
-            foreach (string key in time_control.Keys)
-            {
-                var tracks = time_control[key];
-                foreach (var track in tracks)
-                    track.SetActive(false);
-            }
-            sortedKeys = time_control.Keys
-                              .Select(key => new { Key = key, Value = double.Parse(key) })
-                              .OrderBy(item => item.Value)
-                              .Select(item => item.Key)
-                              .ToList();
-            Debug.Log("PROCEEDING TO TRACK SIMULATION");
-            foreach (string key in sortedKeys)
-            {
-                if (playbool)
-                {
-                    var tracks = time_control[key];
-                    //Debug.Log($"Current Time: {key}");
-                    foreach (var track in tracks)
-                    {
-                        track.SetActive(true);
-                        Debug.Log($"Current Time: {key} || {track.name} activated");
-                    }
-
-                    time.transform.GetComponent<TextMeshProUGUI>().text = key;
-                    // SIM STATUS CONTROL
-                    if ((time.transform.GetComponent<TextMeshProUGUI>().text == stop_time.transform.GetComponent<TextMeshProUGUI>().text))
-                    {
-                        status.transform.GetComponent<TextMeshProUGUI>().text = "Complete";
-                        status.transform.GetComponent<TextMeshProUGUI>().color = Color.green;
-                    }
-                    else {
-                        status.transform.GetComponent<TextMeshProUGUI>().text = "Ongoing";
-                        status.transform.GetComponent<TextMeshProUGUI>().color = Color.red;
-                    }
-                        await PauseForTime(1);
-                }
-            }
-        }
-        else
+        if (playButton.name != "Play")
         {
             playButton.name = "Play";
             playbool = false;
             Debug.Log("PAUSING TRACK SIMULATION");
-
+            return;
         }
 
+        playbool = true;
+        playButton.name = "Pause";
+        Debug.Log("PROCEEDING TO TRACK SIMULATION");
 
+        int stepCount = meshRenderer.TimeStepCount;
+        TextMeshProUGUI timeLabel = time != null ? time.GetComponent<TextMeshProUGUI>() : null;
+        TextMeshProUGUI statusLabel = status != null ? status.GetComponent<TextMeshProUGUI>() : null;
 
+        for (int i = 0; i < stepCount && playbool; i++)
+        {
+            meshRenderer.SetTimeIndex(i);
+
+            if (time_controller != null)
+                time_controller.SetValueWithoutNotify(i);
+
+            if (timeLabel != null)
+                timeLabel.text = meshRenderer.TimeAt(i).ToString();
+
+            if (statusLabel != null)
+            {
+                bool finished = i == stepCount - 1;
+                statusLabel.text = finished ? "Complete" : "Ongoing";
+                statusLabel.color = finished ? Color.green : Color.red;
+            }
+
+            await PauseForTime(1);
+
+            // The await can resume after the scene (and this component) has been torn down.
+            if (this == null)
+                return;
+        }
+
+        playbool = false;
+        playButton.name = "Play";
     }
 
     public float movieDuration = 30f;  // seconds of total playback
@@ -894,10 +1509,41 @@ public class NewBehaviourScript : MonoBehaviour
     // Log is selected; otherwise Linear is used. Default is 1e4 ps (10 ns).
     public double autoLogRangeThresholdPs = 1e4;
 
+    // Ceiling on how many particles may be alive at once. Playback cost is dominated by live
+    // TrailRenderers (each one is a dynamic mesh rebuilt every frame), so this is the knob to turn if a
+    // dense run still stutters. Tracks that would start while the ceiling is full are skipped.
+    public int maxConcurrentMovieTracks = 1500;
+
     private TimeScaleMode effectiveTimeScaleMode;
     private bool movieClockRunning = false;
     private float movieClock;
+
+    // Every eligible track, sorted by start time. Sorting is what lets playback admit tracks with one
+    // advancing cursor rather than testing the whole run every frame.
     private List<Track> movieTracksCache;
+    private int movieNextToStart;
+    private readonly List<Track> movieLive = new List<Track>();
+    private bool movieCeilingWarned;
+
+    // Particles are pooled: a dense run spawns and retires thousands of them, and Instantiate/Destroy
+    // churn on that scale is its own source of hitching.
+    private readonly Stack<GameObject> moviePool = new Stack<GameObject>();
+
+    // One material shared by every trail. Previously each spawn did `new Material(Shader.Find(...))` --
+    // a string lookup across all loaded shaders plus a fresh material, per track. Trail colour comes
+    // from startColor/endColor, which Sprites/Default reads as vertex colour, so sharing is free.
+    private static Material movieTrailMaterial;
+
+    private static Material MovieTrailMaterial
+    {
+        get
+        {
+            if (movieTrailMaterial == null)
+                movieTrailMaterial = new Material(Shader.Find("Sprites/Default"));
+
+            return movieTrailMaterial;
+        }
+    }
 
     // --- Initialize movie mode ---
     public void movie_init()
@@ -908,7 +1554,8 @@ public class NewBehaviourScript : MonoBehaviour
         foreach (var typeEntry in trackInfo)
         {
             foreach (var track in typeEntry.Value.Values)
-                track.trackObj.SetActive(false);
+                if (track.trackObj != null)
+                    track.trackObj.SetActive(false);
         }
 
         drawMeshes = false;
@@ -919,22 +1566,26 @@ public class NewBehaviourScript : MonoBehaviour
 
         // clean up any particles left over from a movie run already in progress
         movieClockRunning = false;
-        if (movieTracksCache != null)
-        {
-            foreach (var track in movieTracksCache)
-                DespawnMovieTrack(track);
-        }
+        ReleaseLiveMovieTracks();
 
         effectiveTimeScaleMode = ResolveTimeScaleMode();
         PrecomputeMovieTimes();
 
         movieTracksCache = trackInfo.Values
             .SelectMany(d => d.Values)
-            .Where(t => t.positions != null && t.positions.Count >= 2 && t.movieTimes.Count == t.positions.Count)
+            .Where(t => t.positions != null && t.positions.Length >= 2 && t.movieTimes.Length == t.positions.Length)
             .ToList();
 
+        movieTracksCache.Sort((a, b) => a.movieTimes[0].CompareTo(b.movieTimes[0]));
+
         foreach (var track in movieTracksCache)
+        {
             track.movieCursor = 0;
+            track.movieSpawned = false;
+        }
+
+        movieNextToStart = 0;
+        movieCeilingWarned = false;
 
         Debug.Log($"[MOVIE] Start Time: {minT} ps, End Time: {maxT} ps, mode: {effectiveTimeScaleMode}");
 
@@ -948,18 +1599,14 @@ public class NewBehaviourScript : MonoBehaviour
         Debug.Log("[MOVIE] Deinitializing movie...");
 
         movieClockRunning = false;
-
-        if (movieTracksCache != null)
-        {
-            foreach (var track in movieTracksCache)
-                DespawnMovieTrack(track);
-        }
+        ReleaseLiveMovieTracks();
 
         // Reactivate original track objects
         foreach (var typeEntry in trackInfo)
         {
             foreach (var track in typeEntry.Value.Values)
-                track.trackObj.SetActive(true);
+                if (track.trackObj != null)
+                    track.trackObj.SetActive(true);
         }
 
         Menus.SetActive(true);
@@ -991,9 +1638,11 @@ public class NewBehaviourScript : MonoBehaviour
         {
             foreach (var track in typeEntry.Value.Values)
             {
-                track.movieTimes.Clear();
-                foreach (double t in track.times)
-                    track.movieTimes.Add(RemapTime(t));
+                int n = track.StepCount;
+                if (track.movieTimes.Length != n)
+                    track.movieTimes = new float[n];
+                for (int i = 0; i < n; i++)
+                    track.movieTimes[i] = (float)RemapTime(track.times[i]);
             }
         }
     }
@@ -1038,53 +1687,129 @@ public class NewBehaviourScript : MonoBehaviour
         EvaluateMovieTracks();
     }
 
+    // Advances playback by touching only the particles that are actually on screen.
+    //
+    // This used to call EvaluateTrack for every track in the run, every frame -- hundreds of thousands
+    // of iterations per frame on a dense run, almost all of them on tracks that had not started yet or
+    // had long since finished. The cache is sorted by start time and the clock only moves forward, so
+    // admission is a single advancing cursor and the per-frame work is proportional to what is visible.
     private void EvaluateMovieTracks()
     {
-        foreach (var track in movieTracksCache)
-            EvaluateTrack(track);
-    }
-
-    private void EvaluateTrack(Track track)
-    {
-        List<double> mt = track.movieTimes;
-        int n = mt.Count;
-
-        if (movieClock < mt[0] || movieClock > mt[n - 1])
+        while (movieNextToStart < movieTracksCache.Count)
         {
-            if (track.movieSpawned)
-                DespawnMovieTrack(track);
-            return;
+            Track candidate = movieTracksCache[movieNextToStart];
+            if (candidate.movieTimes[0] > movieClock)
+                break;
+
+            movieNextToStart++;
+
+            // Its whole lifetime elapsed within one frame (or during a hitch): never worth spawning.
+            if (candidate.movieTimes[candidate.movieTimes.Length - 1] < movieClock)
+                continue;
+
+            if (movieLive.Count >= maxConcurrentMovieTracks)
+            {
+                if (!movieCeilingWarned)
+                {
+                    movieCeilingWarned = true;
+                    UnityEngine.Debug.LogWarning($"[MOVIE] More than {maxConcurrentMovieTracks} tracks are live at once; the excess is being skipped. Raise maxConcurrentMovieTracks if the headset can take it.");
+                }
+
+                continue;
+            }
+
+            SpawnMovieTrack(candidate);
+            movieLive.Add(candidate);
         }
 
-        if (!track.movieSpawned)
-            SpawnMovieTrack(track);
+        // Backwards, so finished tracks can be removed in place.
+        for (int i = movieLive.Count - 1; i >= 0; i--)
+        {
+            Track track = movieLive[i];
+            if (EvaluateTrack(track))
+                continue;
+
+            DespawnMovieTrack(track);
+            movieLive.RemoveAt(i);
+        }
+    }
+
+    // Returns false once the track has played out and should be retired.
+    private bool EvaluateTrack(Track track)
+    {
+        float[] mt = track.movieTimes;
+        int n = mt.Length;
+
+        if (movieClock > mt[n - 1] || !track.movieSpawned)
+            return false;
 
         // movieClock only moves forward, so the cursor only ever advances.
         while (track.movieCursor < n - 2 && mt[track.movieCursor + 1] < movieClock)
             track.movieCursor++;
 
         int i = track.movieCursor;
-        double segStart = mt[i];
-        double segEnd = mt[i + 1];
-        float t = segEnd > segStart ? Mathf.Clamp01((float)((movieClock - segStart) / (segEnd - segStart))) : 1f;
+        float segStart = mt[i];
+        float segEnd = mt[i + 1];
+        float t = segEnd > segStart ? Mathf.Clamp01((movieClock - segStart) / (segEnd - segStart)) : 1f;
 
-        track.movieObj.transform.position = Vector3.Lerp(track.positions[i], track.positions[i + 1], t);
+        // positions are baked (root-local); place the marker in the same space as the scaled tracks.
+        Vector3 lerped = Vector3.Lerp(track.positions[i], track.positions[i + 1], t);
+        if (scaleRoot != null)
+            track.movieObj.transform.localPosition = lerped;
+        else
+            track.movieObj.transform.position = lerped;
+
+        return true;
     }
 
     private void SpawnMovieTrack(Track track)
     {
-        GameObject sph = Instantiate(movie_prefab, track.positions[0], Quaternion.identity);
-        sph.GetComponent<Renderer>().material.color = track.color;
+        GameObject sph;
+        TrailRenderer trail;
+
+        if (moviePool.Count > 0)
+        {
+            sph = moviePool.Pop();
+            trail = sph.GetComponent<TrailRenderer>();
+            sph.SetActive(true);
+        }
+        else
+        {
+            sph = Instantiate(movie_prefab);
+
+            trail = sph.GetComponent<TrailRenderer>();
+            if (trail == null)
+                trail = sph.AddComponent<TrailRenderer>();
+
+            trail.time = 1f;
+            trail.startWidth = 0.1f;
+            trail.endWidth = 0f;
+            trail.material = MovieTrailMaterial;
+        }
+
+        if (scaleRoot != null)
+        {
+            sph.transform.SetParent(scaleRoot, false);
+            sph.transform.localPosition = track.positions[0];
+        }
+        else
+        {
+            sph.transform.SetParent(null, false);
+            sph.transform.position = track.positions[0];
+        }
+
         sph.transform.localScale = Vector3.one * 0.08f;
 
-        TrailRenderer trail = sph.AddComponent<TrailRenderer>();
-        trail.time = 1f;
-        trail.startWidth = 0.1f;
-        trail.endWidth = 0f;
-        trail.material = new Material(Shader.Find("Sprites/Default"));
+        // Reading Renderer.material instantiates a copy, but only the first time for a given pooled
+        // object -- so the number of particle materials is the pool size, not the track count.
+        Renderer rend = sph.GetComponent<Renderer>();
+        if (rend != null)
+            rend.material.color = track.color;
+
         trail.startColor = track.color;
         trail.endColor = new Color(1, 1, 1, 0);
-        trail.Clear();
+        trail.emitting = true;
+        trail.Clear(); // after positioning, so the trail does not streak in from the last user
 
         track.movieObj = sph;
         track.movieTrail = trail;
@@ -1092,24 +1817,54 @@ public class NewBehaviourScript : MonoBehaviour
         track.movieCursor = 0;
     }
 
+    // Returns the particle to the pool. (The old version asked for a fade-out -- detach the trail and
+    // Destroy it after trail.time -- but then destroyed the very same GameObject immediately on the
+    // next line, so no fade ever happened. Retiring instantly matches what was actually on screen.)
     private void DespawnMovieTrack(Track track)
     {
         if (!track.movieSpawned)
             return;
 
-        if (track.movieTrail != null)
-        {
-            track.movieTrail.transform.SetParent(null, true);
-            track.movieTrail.emitting = false;
-            Destroy(track.movieTrail.gameObject, track.movieTrail.time);
-        }
+        GameObject sph = track.movieObj;
 
-        if (track.movieObj != null)
-            Destroy(track.movieObj);
+        if (sph != null)
+        {
+            if (track.movieTrail != null)
+            {
+                track.movieTrail.emitting = false;
+                track.movieTrail.Clear();
+            }
+
+            sph.SetActive(false);
+            moviePool.Push(sph);
+        }
 
         track.movieObj = null;
         track.movieTrail = null;
         track.movieSpawned = false;
+    }
+
+    private void ReleaseLiveMovieTracks()
+    {
+        for (int i = movieLive.Count - 1; i >= 0; i--)
+            DespawnMovieTrack(movieLive[i]);
+
+        movieLive.Clear();
+    }
+
+    // Pooled particles are parented to the shared scale root rather than to this clone, so a run switch
+    // would otherwise leave them behind as orphaned inactive objects under WorldScaleRoot. They belong
+    // to the component that owns the pool, so they go when it does.
+    private void OnDestroy()
+    {
+        ReleaseLiveMovieTracks();
+
+        while (moviePool.Count > 0)
+        {
+            GameObject pooled = moviePool.Pop();
+            if (pooled != null)
+                Destroy(pooled);
+        }
     }
 
 
@@ -1118,32 +1873,20 @@ public class NewBehaviourScript : MonoBehaviour
 
 
 
-    public void SteppedTracks(Slider slider) 
+    // Slider-driven time scrub. Kept as the public entry point (a persistent UnityEvent in Custom.unity
+    // still names it), but it now moves the unified mesh's time index rather than rebuilding a sorted
+    // list of stringified times on every single slider movement.
+    public void SteppedTracks(Slider slider)
     {
-        foreach (string key in time_control.Keys)
-        {
-            var tracks = time_control[key];
-            foreach (var track in tracks)
-                track.SetActive(false);
-        }
-        sortedKeys = time_control.Keys
-                          .Select(key => new { Key = key, Value = double.Parse(key) })
-                          .OrderBy(item => item.Value)
-                          .Select(item => item.Key)
-                          .ToList();
-        int t_slider = (int) slider.value;
-        string max = sortedKeys[t_slider];
-        time.transform.GetComponent<TextMeshProUGUI>().text = max;
-        foreach (string key in sortedKeys)
-        {
-            if (sortedKeys.IndexOf(key) <= t_slider)
-            {
-                var tracks = time_control[key];
-                foreach (var track in tracks)
-                    track.SetActive(true);
-            }
-            else break;
-        }
+        TrackMeshRenderer meshRenderer = GetComponent<TrackMeshRenderer>();
+        if (meshRenderer == null || slider == null)
+            return;
+
+        int index = (int)slider.value;
+        meshRenderer.SetTimeIndex(index);
+
+        if (time != null)
+            time.GetComponent<TextMeshProUGUI>().text = meshRenderer.TimeAt(index).ToString();
     }
 
     async Task PauseForTime(int t)
@@ -1197,54 +1940,193 @@ public class NewBehaviourScript : MonoBehaviour
         return (p - closest).sqrMagnitude;
     }
 
+    // Per-step track data, held as exact-sized arrays rather than List<double>.
+    //
+    // Why: a large run is ~400k tracks / several million steps, and every per-step quantity in the
+    // binary format is written as a 32-bit float (BinaryReader.ReadSingle), so storing them as double
+    // doubled the footprint without adding a single bit of precision -- the widening was lossless in
+    // both directions. Exact-sized arrays also avoid List<T>'s doubling growth, which wastes up to 2x.
+    //
+    // Process and volume names are not stored per step either: the file ships a string table and a
+    // per-step ushort index into it, so we keep the index and resolve on demand (ProcessAt/VolumeAt).
+    //
+    // Net effect per step: ~160 B -> ~46 B.
     public class Track
     {
+        private static readonly Vector3[] NoPositions = System.Array.Empty<Vector3>();
+        private static readonly float[] NoFloats = System.Array.Empty<float>();
+        private static readonly ushort[] NoUShorts = System.Array.Empty<ushort>();
+
         public int ID;
         public int eventID; // which GEANT4 event this track belongs to; only meaningful for binary/custom scenes
-        public List<Vector3> positions = new List<Vector3>();
-        public List<double> times = new List<double>();
-        public List<double> energies = new List<double>();
         public string type;
         public string particleName;
         public bool colorByRGB;
         public Color color;
+        public ushort particleNameID;
 
-        public List<string> processes = new List<string>();
-        public List<double> edeps = new List<double>();
-        public List<double> px = new List<double>();
-        public List<double> py = new List<double>();
-        public List<double> pz = new List<double>();
+        // --- per-step data; every array below has length StepCount ---
+        public Vector3[] positions = NoPositions;
+        public float[] times = NoFloats;
+        public float[] energies = NoFloats;
+        public float[] edeps = NoFloats;
+        public float[] px = NoFloats;
+        public float[] py = NoFloats;
+        public float[] pz = NoFloats;
+        public ushort[] processIDs = NoUShorts;
+        public ushort[] volumeIDs = NoUShorts; // binary/custom scenes only; empty for the CSV examples
 
+        public int StepCount => positions.Length;
+
+        // Step i's GEANT4 process / physical-volume name, resolved against the run's string table.
+        public string ProcessAt(int i) => LookupString(processIDs, i);
+        public string VolumeAt(int i) => LookupString(volumeIDs, i);
 
         public GameObject trackObj; // parent gameobejct of each track
         public List<GameObject> segments = new List<GameObject>(); // segments of the track 
+
+        // Where this track's entries sit in the shared `colliders` list. DrawTrack appends them in one
+        // uninterrupted run, so the range is contiguous and the spatial index can name a whole track
+        // with two ints instead of listing every segment separately.
+        public int firstColliderIndex = -1;
+        public int colliderCount;
         private LayerMask raycastLayerMask; // Set this to ensure only relevant objects are hit
 
-        // only for binary/custom scene.
-
-        public List<ushort> processIDs = new List<ushort>();
-        public List<ushort> volumeIDs = new List<ushort>();
-        public List<string> volumeNames = new List<string>(); // resolved from volumeIDs; empty for CSV example scenes
-        public ushort particleNameID;
-
         // movie mode: times[] remapped into [0, movieDuration], plus per-track playback state
-        public List<double> movieTimes = new List<double>();
+        public float[] movieTimes = NoFloats;
         public int movieCursor;
         public bool movieSpawned;
         public GameObject movieObj;
         public TrailRenderer movieTrail;
 
-        public void DrawTrack(Dictionary<string, List<GameObject>> list)
+        // --- step accumulation ------------------------------------------------------------------
+        // Steps arrive one at a time (and, in the CSV case, interleaved between tracks), so they land
+        // in growable lists first and are frozen into the arrays above by Compact(). The scratch is
+        // dropped at that point, so the transient List overhead never outlives parsing.
+        private sealed class Scratch
         {
-            if (positions == null || positions.Count < 2)
+            public List<Vector3> positions;
+            public List<float> times, energies, edeps, px, py, pz;
+            public List<ushort> processIDs, volumeIDs;
+        }
+
+        private Scratch scratch;
+
+        // `expected` is the step count when it is known up front (the binary format stores it), so the
+        // lists can be allocated exactly once with no growth reallocations at all.
+        //
+        // Reopening an already-compacted track seeds the scratch from its existing arrays rather than
+        // starting empty. That only happens when one key is written twice -- the v1 binary fallback
+        // separates events by a trackID==1 heuristic, which can collide -- and without the seeding the
+        // second batch of steps would silently replace the first instead of extending it.
+        public void BeginSteps(int expected)
+        {
+            if (scratch != null)
                 return;
 
-            if (times == null || times.Count == 0)
+            int existing = positions.Length;
+            int c = Mathf.Max(expected, 0) + existing;
+
+            scratch = new Scratch
+            {
+                positions = new List<Vector3>(c),
+                times = new List<float>(c),
+                energies = new List<float>(c),
+                edeps = new List<float>(c),
+                px = new List<float>(c),
+                py = new List<float>(c),
+                pz = new List<float>(c),
+                processIDs = new List<ushort>(c),
+                volumeIDs = new List<ushort>(c),
+            };
+
+            if (existing == 0)
+                return;
+
+            scratch.positions.AddRange(positions);
+            scratch.times.AddRange(times);
+            scratch.energies.AddRange(energies);
+            scratch.edeps.AddRange(edeps);
+            scratch.px.AddRange(px);
+            scratch.py.AddRange(py);
+            scratch.pz.AddRange(pz);
+            scratch.processIDs.AddRange(processIDs);
+            scratch.volumeIDs.AddRange(volumeIDs);
+        }
+
+        public void AppendStep(Vector3 position, float time, float energy, float edep,
+                               float momentumX, float momentumY, float momentumZ,
+                               ushort processID, ushort volumeID)
+        {
+            if (scratch == null)
+                BeginSteps(0);
+
+            scratch.positions.Add(position);
+            scratch.times.Add(time);
+            scratch.energies.Add(energy);
+            scratch.edeps.Add(edep);
+            scratch.px.Add(momentumX);
+            scratch.py.Add(momentumY);
+            scratch.pz.Add(momentumZ);
+            scratch.processIDs.Add(processID);
+            scratch.volumeIDs.Add(volumeID);
+        }
+
+        // Freezes the accumulated steps into exact-sized arrays and releases the scratch lists.
+        // Idempotent: calling it on an already-compacted track does nothing.
+        public void Compact()
+        {
+            if (scratch == null)
+                return;
+
+            positions = scratch.positions.ToArray();
+            times = scratch.times.ToArray();
+            energies = scratch.energies.ToArray();
+            edeps = scratch.edeps.ToArray();
+            px = scratch.px.ToArray();
+            py = scratch.py.ToArray();
+            pz = scratch.pz.ToArray();
+            processIDs = scratch.processIDs.ToArray();
+            volumeIDs = scratch.volumeIDs.ToArray();
+
+            scratch = null;
+        }
+
+        // Drops every per-step array so a finished run stops holding hundreds of MB once its scene is
+        // torn down. The track's identity fields are left intact -- they are a few bytes each.
+        public void ReleaseStepData()
+        {
+            scratch = null;
+            firstColliderIndex = -1;
+            colliderCount = 0;
+            positions = NoPositions;
+            times = NoFloats;
+            energies = NoFloats;
+            edeps = NoFloats;
+            px = NoFloats;
+            py = NoFloats;
+            pz = NoFloats;
+            processIDs = NoUShorts;
+            volumeIDs = NoUShorts;
+            movieTimes = NoFloats;
+            segments.Clear();
+            trackObj = null;
+            movieObj = null;
+            movieTrail = null;
+        }
+
+        public void DrawTrack()
+        {
+            if (positions == null || positions.Length < 2)
+                return;
+
+            if (times == null || times.Length == 0)
                 return;
 
             trackObj = new GameObject($"Track_{ID}");
+            firstColliderIndex = colliders.Count;
 
-            for (int i = 0; i < positions.Count - 1; i++)
+            for (int i = 0; i < positions.Length - 1; i++)
             {
                 GameObject trackSegment = new GameObject($"{ID}_TrackSegment_{i + 1}");
                 trackSegment.transform.SetParent(trackObj.transform, false);
@@ -1283,8 +2165,9 @@ public class NewBehaviourScript : MonoBehaviour
                 trackSegment.SetActive(false);
 
                 segments.Add(trackSegment);
-                list[Convert.ToString(times[i])].Add(trackSegment);
             }
+
+            colliderCount = colliders.Count - firstColliderIndex;
         }
 
 
@@ -1334,7 +2217,7 @@ public class NewBehaviourScript : MonoBehaviour
                 ? analysis.transform.GetChild(6).GetComponent<TextMeshProUGUI>().text.Substring(0, analysis.transform.GetChild(6).GetComponent<TextMeshProUGUI>().text.IndexOf(':')+1) + string.Format("{0:N4}", pz[i]) + " MeV/c" // pz
                 : "Colon not found";
             analysis.transform.GetChild(7).GetComponent<TextMeshProUGUI>().text = analysis.transform.GetChild(7).GetComponent<TextMeshProUGUI>().text.IndexOf(':') != -1
-                ? analysis.transform.GetChild(7).GetComponent<TextMeshProUGUI>().text.Substring(0, analysis.transform.GetChild(7).GetComponent<TextMeshProUGUI>().text.IndexOf(':')+1) + processes[i] // process
+                ? analysis.transform.GetChild(7).GetComponent<TextMeshProUGUI>().text.Substring(0, analysis.transform.GetChild(7).GetComponent<TextMeshProUGUI>().text.IndexOf(':')+1) + ProcessAt(i) // process
                 : "Colon not found";
             analysis.transform.GetChild(8).GetComponent<TextMeshProUGUI>().text = analysis.transform.GetChild(8).GetComponent<TextMeshProUGUI>().text.IndexOf(':') != -1
                 ? analysis.transform.GetChild(8).GetComponent<TextMeshProUGUI>().text.Substring(0, analysis.transform.GetChild(8).GetComponent<TextMeshProUGUI>().text.IndexOf(':')+1) + string.Format("{0:N4}", edeps[i]) + " MeV"// edep
@@ -1417,14 +2300,18 @@ public class ParseHelper : MonoBehaviour
     }
 }
 
+// One drawable segment of the unified track mesh, kept sorted by time.
+//
+// Deliberately kept to 12 bytes: on a multi-million-step run this array is one of the largest single
+// allocations in the scene. It therefore stores a particle *id* rather than a Track reference, and
+// only the first vertex index -- the second is always indexA + 1, because a track's vertices are
+// written consecutively by BuildMesh.
 struct TimedSegment
 {
-    public double time;
+    public float time;
     public int indexA;
-    public int indexB;
-    public Track track; 
+    public ushort particleId;
 }
-
 
 
 public class TrackMeshRenderer : MonoBehaviour
@@ -1434,15 +2321,32 @@ public class TrackMeshRenderer : MonoBehaviour
     public Slider time_slider;
 
     Mesh mesh;
+    Material ownedMaterial; // instantiated here, so this component is responsible for destroying it
 
     readonly List<Vector3> vertices = new();
-    readonly List<Color> colors = new();
+    readonly List<Color32> colors = new();
     readonly List<int> indices = new();
     readonly List<TimedSegment> allSegments = new();
-    readonly List<int> timeToIndexCount = new();
 
-    readonly Dictionary<string, bool> cutStates = new Dictionary<string, bool>(); // tracks the visibility of given string names
+    // Time of each currently-visible segment, in the same order as `indices`. Replaces the old
+    // timeToIndexCount list, whose entries were always just (i + 1) * 2 and so carried no information.
+    readonly List<float> visibleTimes = new();
 
+    // Visibility per particle, keyed by the string table id rather than by name, so TimedSegment can
+    // hold a ushort instead of an object reference.
+    readonly Dictionary<ushort, bool> cutStates = new Dictionary<ushort, bool>();
+    readonly Dictionary<string, ushort> idByParticle = new Dictionary<string, ushort>();
+
+    // Number of time steps the slider can scrub through.
+    public int TimeStepCount => visibleTimes.Count;
+
+    // Time (in the run's own units) at a given slider index.
+    public float TimeAt(int timeIndex)
+    {
+        if (visibleTimes.Count == 0)
+            return 0f;
+        return visibleTimes[Mathf.Clamp(timeIndex, 0, visibleTimes.Count - 1)];
+    }
 
     void Awake()
     {
@@ -1455,7 +2359,40 @@ public class TrackMeshRenderer : MonoBehaviour
         var mr = gameObject.AddComponent<MeshRenderer>();
 
         mf.sharedMesh = mesh;
-        mr.sharedMaterial = new Material(Shader.Find("Sprites/Default"));
+        ownedMaterial = new Material(Shader.Find("Sprites/Default"));
+        mr.sharedMaterial = ownedMaterial;
+    }
+
+    // The mesh and material are created with `new`, so Unity will never collect them on its own --
+    // without this, every run switch (which builds a fresh track_renderer clone) stranded a whole
+    // run's worth of vertex and index buffers plus a material.
+    void OnDestroy()
+    {
+        if (mesh != null)
+        {
+            mesh.Clear();
+            Destroy(mesh);
+            mesh = null;
+        }
+
+        if (ownedMaterial != null)
+        {
+            Destroy(ownedMaterial);
+            ownedMaterial = null;
+        }
+
+        vertices.Clear();
+        vertices.TrimExcess();
+        colors.Clear();
+        colors.TrimExcess();
+        indices.Clear();
+        indices.TrimExcess();
+        allSegments.Clear();
+        allSegments.TrimExcess();
+        visibleTimes.Clear();
+        visibleTimes.TrimExcess();
+        cutStates.Clear();
+        idByParticle.Clear();
     }
 
     public void BuildMesh()
@@ -1463,33 +2400,54 @@ public class TrackMeshRenderer : MonoBehaviour
         vertices.Clear();
         colors.Clear();
         indices.Clear();
-        timeToIndexCount.Clear();
+        visibleTimes.Clear();
         allSegments.Clear();
+        cutStates.Clear();
+        idByParticle.Clear();
+
+        // Size the buffers once up front; growing them by doubling would transiently hold two copies of
+        // a multi-million-element array.
+        int totalSteps = 0;
+        foreach (var track in trackInstances)
+            totalSteps += track.StepCount;
+
+        if (vertices.Capacity < totalSteps) vertices.Capacity = totalSteps;
+        if (colors.Capacity < totalSteps) colors.Capacity = totalSteps;
+        if (allSegments.Capacity < totalSteps) allSegments.Capacity = totalSteps;
 
         foreach (var track in trackInstances)
         {
-            if (track.positions == null || track.positions.Count < 2)
+            if (track.positions == null || track.positions.Length < 2)
                 continue;
 
             int baseVertex = vertices.Count;
-            Color trackColor = track.color;
 
-            for (int i = 0; i < track.positions.Count; i++)
+            // Color32 rather than Color: 4 bytes per vertex instead of 16, for the same 8-bit-per-channel
+            // result the display can actually show.
+            Color32 trackColor = track.color;
+            ushort particleId = track.particleNameID;
+
+            if (!string.IsNullOrEmpty(track.particleName))
+                idByParticle[track.particleName] = particleId;
+
+            for (int i = 0; i < track.positions.Length; i++)
             {
                 vertices.Add(track.positions[i]);
                 colors.Add(trackColor);
             }
 
-            for (int i = 0; i < track.positions.Count - 1; i++)
+            for (int i = 0; i < track.positions.Length - 1; i++)
             {
                 allSegments.Add(new TimedSegment
                 {
                     time = track.times[i + 1],
                     indexA = baseVertex + i,
-                    indexB = baseVertex + i + 1,
-                    track = track
+                    particleId = particleId
                 });
             }
+
+            if (!cutStates.ContainsKey(particleId))
+                cutStates[particleId] = true;
         }
 
         allSegments.Sort((a, b) => a.time.CompareTo(b.time));
@@ -1499,20 +2457,19 @@ public class TrackMeshRenderer : MonoBehaviour
         mesh.SetColors(colors);
         mesh.RecalculateBounds();
 
-        foreach (var track in trackInstances)
-        {
-            if (!cutStates.ContainsKey(track.particleName))
-                cutStates[track.particleName] = true;
-        }
+        // The mesh owns its own copy of the vertex data now, so release ours instead of holding a
+        // second multi-million-element copy for the lifetime of the scene.
+        vertices.Clear();
+        vertices.TrimExcess();
+        colors.Clear();
+        colors.TrimExcess();
 
         ApplyCuts();
     }
 
-
-
     public void SliderSetup()
     {
-        time_slider.maxValue = timeToIndexCount.Count - 1;
+        time_slider.maxValue = Mathf.Max(0, visibleTimes.Count - 1);
         time_slider.minValue = 0;
         time_slider.wholeNumbers = true;
         time_slider.onValueChanged.AddListener((interactor) => SetTimeIndex((int) time_slider.value));
@@ -1520,12 +2477,11 @@ public class TrackMeshRenderer : MonoBehaviour
 
     public void SetTimeIndex(int timeIndex)
     {
-        if (timeToIndexCount.Count == 0)
+        if (visibleTimes.Count == 0)
             return;
 
-        int indexCount = timeToIndexCount[
-            Mathf.Clamp(timeIndex, 0, timeToIndexCount.Count - 1)
-        ];
+        // Each visible segment contributes exactly two indices, so the prefix count is positional.
+        int indexCount = (Mathf.Clamp(timeIndex, 0, visibleTimes.Count - 1) + 1) * 2;
 
         mesh.SetIndices(
             indices,
@@ -1538,8 +2494,8 @@ public class TrackMeshRenderer : MonoBehaviour
 
     public void ApplyCuts(string pname=null, bool active=true)
     {
-        if (pname != null)
-            cutStates[pname] = active;
+        if (pname != null && idByParticle.TryGetValue(pname, out ushort id))
+            cutStates[id] = active;
 
         RebuildIndices();
     }
@@ -1547,23 +2503,21 @@ public class TrackMeshRenderer : MonoBehaviour
     void RebuildIndices()
     {
         indices.Clear();
-        timeToIndexCount.Clear();
+        visibleTimes.Clear();
 
         foreach (var seg in allSegments)
         {
-            if (cutStates.TryGetValue(seg.track.particleName, out bool visible)
-                && !visible)
-            {
+            if (cutStates.TryGetValue(seg.particleId, out bool visible) && !visible)
                 continue;
-            }
 
             indices.Add(seg.indexA);
-            indices.Add(seg.indexB);
-            timeToIndexCount.Add(indices.Count);
+            indices.Add(seg.indexA + 1); // a track's vertices are consecutive; see TimedSegment
+            visibleTimes.Add(seg.time);
         }
 
         mesh.SetIndices(indices, MeshTopology.Lines, 0);
+
+        if (time_slider != null)
+            time_slider.maxValue = Mathf.Max(0, visibleTimes.Count - 1);
     }
-
-
 }

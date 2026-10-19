@@ -9785,10 +9785,10 @@ MonoBehaviour:
   markerMat: {fileID: 2100000, guid: 407ee8af1993f4c449e3689d906c5e92, type: 2}
   player: {fileID: 0}
   time_scale: 0
-  maxActive: 1000
-  recomputeInterval: 5
-  activateRadius: 2
-  releaseRadius: 2.5
+  maxActive: 5000
+  recomputeInterval: 1.5
+  activateRadius: 6
+  releaseRadius: 7.5
   time_controller: {fileID: 2146586871}
   time: {fileID: 1874002636}
   start_time: {fileID: 760188077}

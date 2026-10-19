@@ -47,19 +47,39 @@ public class RunManager : MonoBehaviour
 
     private void ClearCurrentRun()
     {
-        Debug.Log("Clearing " + NewBehaviourScript.tracks.Count + " tracks");
+        Debug.Log("[RUNMANAGER] Clearing run " + run);
 
-        foreach (var typeEntry in NewBehaviourScript.trackInfo) // you cannot access List<> tracks - all are null.
+        foreach (var typeEntry in NewBehaviourScript.trackInfo)
         {
             var tracksByType = typeEntry.Value;
             foreach (var track in tracksByType)
             {
-                Destroy(track.Value.trackObj);
+                if (track.Value.trackObj != null)
+                    Destroy(track.Value.trackObj);
             }
         }
 
-        if (GameObject.Find("track_renderer")) Destroy(GameObject.Find("track_renderer"));
-        if (GameObject.Find("track_renderer(Clone)")) Destroy(GameObject.Find("track_renderer(Clone)"));
+        // Destroy the clone by reference. The old name lookup missed it whenever the clone had been
+        // reparented under WorldScaleRoot, which left the previous run's TrackMeshRenderer alive --
+        // and with it a whole run's worth of vertex and index buffers, since those are only released
+        // by its OnDestroy.
+        if (runInstance != null)
+        {
+            Destroy(runInstance);
+            runInstance = null;
+        }
+        else
+        {
+            GameObject stale = GameObject.Find("track_renderer(Clone)");
+            if (stale == null) stale = GameObject.Find("track_renderer");
+            if (stale != null) Destroy(stale);
+        }
+
+        // Drop the parsed run itself. Its per-step arrays are the single largest allocation in the
+        // scene, and holding them while the next run downloads and parses would double the peak.
+        // The detector geometry is left alone -- it outlives a run switch.
+        NewBehaviourScript.ReleaseRunData();
+        TrackAnalyser.ReleaseRunState();
 
         Debug.Log("Cleared Run "+run);
     }
@@ -74,6 +94,12 @@ public class RunManager : MonoBehaviour
             //TextAsset newRun = await PullRun(); // debugging with default address
             if (newRun != null)
             {
+                // The previous run's GameObjects were destroyed before the download started, so by now
+                // several frames have passed and Unity has actually processed those destroys. This is
+                // therefore the point at which their meshes and materials can really be reclaimed --
+                // and it is already a loading moment, so the collection pause is free.
+                SessionMemory.Unload();
+
                 track_renderer_Prefab.transform.GetComponent<NewBehaviourScript>().customFile = newRun;
                 runInstance = Instantiate(track_renderer_Prefab);
                 runInstance.transform.GetComponent<NewBehaviourScript>().enabled = true;
@@ -86,39 +112,39 @@ public class RunManager : MonoBehaviour
         
     }
 
+    // Resolves the current run to a file on disk. ServerGET prefetched every run into RunCache during
+    // the menu's loading screen, so the common path is a cache hit and costs no network time at all --
+    // which is the whole point: switching runs in-scene no longer stalls on a download.
     private async Task<string> PullRun(string parentURL = @"http://192.168.0.214:2535/files/testuser/")
     {
-        //string url = parentURL + "run" + run + ".csv";
-        //string savePath = Path.Combine(Application.persistentDataPath, $"run{run}.csv");
-
-        // for binary
-        string url = parentURL + "run" + run + ".bin";
-        string savePath = Path.Combine(Application.persistentDataPath, $"run{run}.bin");
-
-        using (UnityWebRequest www = UnityWebRequest.Get(url))
+        string cached = RunCache.PathIfPresent(parentURL, run);
+        if (cached != null)
         {
-            Debug.Log("[RunManager] Requesting at URL: " + url);
-
-            www.downloadHandler = new DownloadHandlerFile(savePath);
-
-            var operation = www.SendWebRequest();
-            while (!operation.isDone)
-                await Task.Yield();
-
-            if (www.result != UnityWebRequest.Result.Success)
-            {
-                Debug.LogError(www.error);
-                return null;
-            }
-
-            Debug.Log("Download complete to disk.");
-            return savePath;
+            Debug.Log($"[RunManager] Run {run} served from cache ({cached}).");
+            return cached;
         }
+
+        // Miss: the prefetch failed, was skipped, or this run appeared after it. Fetch it now and seed
+        // the cache, so a second visit to this run is instant. allowSkip:false -- a miss means there is
+        // no usable local copy, so the HEAD round-trip would only add latency.
+        Debug.Log($"[RunManager] Run {run} not cached; downloading on demand.");
+        return await RunCache.Fetch(parentURL, run, null, allowSkip: false);
     }
 
 
     public async Task<int> getRunCount(string parentURL)
     {
+        // The menu already listed the runs while prefetching them, so reuse that instead of making the
+        // scene wait on a second request. It is also more accurate than the fallback below, which
+        // assumes the listing holds exactly one non-run file (the .glb).
+        int[] known = RunCache.KnownRuns;
+        if (known != null && known.Length > 0)
+        {
+            Debug.Log($"[RunManager] Using {known.Length} prefetched run(s).");
+            Carousel.transform.GetComponent<NumberCarousel>().InstantiateCarousel(known.Length);
+            return known.Length;
+        }
+
         string url = parentURL + "list";
 
         using (UnityWebRequest request = UnityWebRequest.Get(url))
