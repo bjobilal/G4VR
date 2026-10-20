@@ -1423,7 +1423,7 @@ RectTransform:
   m_AnchorMin: {x: 0, y: 1}
   m_AnchorMax: {x: 1, y: 1}
   m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_SizeDelta: {x: 0, y: 675}
   m_Pivot: {x: 0.5, y: 1}
 --- !u!114 &137270564
 MonoBehaviour:
@@ -2075,7 +2075,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   m_Material: {fileID: 0}
-  m_Color: {r: 0.36196154, g: 0.8925622, b: 0.9245283, a: 1}
+  m_Color: {r: 0.5372549, g: 0.7686275, b: 0.18039216, a: 1}
   m_RaycastTarget: 1
   m_RaycastPadding: {x: 0, y: 0, z: 0, w: 0}
   m_Maskable: 1
@@ -14039,10 +14039,10 @@ RectTransform:
   m_Children: []
   m_Father: {fileID: 137270563}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
-  m_AnchorMin: {x: 0, y: 0}
-  m_AnchorMax: {x: 0, y: 0}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchorMin: {x: 0, y: 1}
+  m_AnchorMax: {x: 0, y: 1}
+  m_AnchoredPosition: {x: 258, y: -475.5}
+  m_SizeDelta: {x: 484, y: 367}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &1286828705
 CanvasRenderer:
@@ -14085,7 +14085,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: "Welcome to G4VR. (v2.5)\n\nUse the Built-In example scenes to get started.
+  m_Text: "Welcome to G4VR (v2.5) !\n\nUse the Built-In example scenes to get started.
     \n\nFor advanced users wishing to load their own experiments into G4VR, use the
     Browse Experiment option and the G4Xr driver. \n\nI hope you enjoy our application
     and your experiment in VR!\n\nFor any questions or concerns, please contact Benjamin
@@ -15580,7 +15580,7 @@ RectTransform:
   m_Father: {fileID: 506255664}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
-  m_AnchorMax: {x: 0, y: 0}
+  m_AnchorMax: {x: 1, y: 1}
   m_AnchoredPosition: {x: 0, y: 0}
   m_SizeDelta: {x: 20, y: 20}
   m_Pivot: {x: 0.5, y: 0.5}
@@ -16233,7 +16233,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &1487159472
 RectTransform:
   m_ObjectHideFlags: 0
@@ -21198,10 +21198,10 @@ RectTransform:
   m_Children: []
   m_Father: {fileID: 137270563}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
-  m_AnchorMin: {x: 0, y: 0}
-  m_AnchorMax: {x: 0, y: 0}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchorMin: {x: 0, y: 1}
+  m_AnchorMax: {x: 0, y: 1}
+  m_AnchoredPosition: {x: 258, y: -146}
+  m_SizeDelta: {x: 484, y: 260}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1890832316
 MonoBehaviour:
