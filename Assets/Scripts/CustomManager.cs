@@ -13,6 +13,16 @@ public class CustomManager : MonoBehaviour
 
     GameObject Geometry;
 
+    // The detector renders as a flat translucent grey in normal (tracks) mode, whatever the GLB's own
+    // materials were authored with. Edep mode replaces it with the energy gradient and restores this on
+    // the way out.
+    public static Color DefaultGeometryColor = new Color(0.6f, 0.6f, 0.6f);
+
+    [Range(0f, 1f)]
+    public float geometryOpacity = 0.25f;
+
+    private Material instancedMaterial;
+
     TextMeshProUGUI error_header;
     TextMeshProUGUI error_message;
 
@@ -33,7 +43,7 @@ public class CustomManager : MonoBehaviour
         catch
         {
             Geometry.SetActive(true);
-            SetOpacity(GameObject.Find("DinklageLikenessSculpt"), 0.05f);
+            SetOpacity(GameObject.Find("DinklageLikenessSculpt"), geometryOpacity);
         }
         Geometry.SetActive(true);
     }
@@ -48,8 +58,58 @@ public class CustomManager : MonoBehaviour
         yield return new WaitForSeconds(0.05f);
         Debug.Log("Setting Opacity...");
 
-        SetOpacity(Geometry.transform.GetChild(0).gameObject, 0.05f);
+        SetOpacity(Geometry.transform.GetChild(0).gameObject, geometryOpacity);
+        ApplyInstancedGeometryMaterial();
     }
+    // Hands InstancedGeometryDrawer a Standard-shader material to draw the detector with.
+    //
+    // This is what actually puts the geometry on screen in a build. SetOpacity above only reaches the
+    // glTF materials, whose transparent variant is stripped from the player (see the comment on
+    // InstancedGeometryDrawer.defaultMaterial), so on device those draws produce nothing at all.
+    private void ApplyInstancedGeometryMaterial()
+    {
+        if (InstancedGeometryDrawer.Active == null)
+            return;
+
+        if (instancedMaterial != null)
+            Destroy(instancedMaterial);
+
+        instancedMaterial = BuildTranslucentMaterial(DefaultGeometryColor, geometryOpacity);
+        InstancedGeometryDrawer.Active.defaultMaterial = instancedMaterial;
+    }
+
+    // Same recipe TrackAnalyser uses for its edep materials -- deliberately, because that path is
+    // already known to render correctly on the headset.
+    public static Material BuildTranslucentMaterial(Color rgb, float opacity)
+    {
+        Material mat = new Material(Shader.Find("Standard"));
+
+        mat.color = new Color(rgb.r, rgb.g, rgb.b, opacity);
+        mat.SetFloat("_Mode", 3f); // Transparent
+        mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+        mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+        mat.SetInt("_ZWrite", 0);
+        mat.DisableKeyword("_ALPHATEST_ON");
+        mat.EnableKeyword("_ALPHABLEND_ON");
+        mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        mat.renderQueue = 3000;
+        mat.enableInstancing = true; // required by Graphics.DrawMeshInstanced
+
+        return mat;
+    }
+
+    private void OnDestroy()
+    {
+        if (instancedMaterial == null)
+            return;
+
+        if (InstancedGeometryDrawer.Active != null && InstancedGeometryDrawer.Active.defaultMaterial == instancedMaterial)
+            InstancedGeometryDrawer.Active.defaultMaterial = null;
+
+        Destroy(instancedMaterial);
+        instancedMaterial = null;
+    }
+
     public static void SetOpacity(GameObject parent, float opacity)
     {
         foreach (Transform child in parent.transform)
@@ -57,9 +117,14 @@ public class CustomManager : MonoBehaviour
             Renderer renderer = child.GetComponent<Renderer>();
             if (renderer != null)
             {
-                foreach (Material mat in renderer.materials)
+                // sharedMaterials, NOT materials. Reading renderer.materials hands back private
+                // per-renderer COPIES -- so these settings landed on copies attached to renderers that
+                // InstancedGeometryDrawer has switched off, and never reached the screen at all. The
+                // drawer draws using the materials it captured from sharedMaterials at import time, so
+                // those are the objects that have to be modified for the detector to look translucent.
+                foreach (Material mat in renderer.sharedMaterials)
                 {
-                    Color color = mat.color;
+                    Color color = DefaultGeometryColor;
                     color.a = opacity;
                     mat.color = color;
                     mat.SetFloat("_Mode", 2);

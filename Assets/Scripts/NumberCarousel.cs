@@ -163,10 +163,26 @@ public class NumberCarousel : MonoBehaviour
         }
     }
 
+    // Below this gap, a number counts as settled and stops being written to.
+    private const float SettleEpsilon = 0.0005f;
+
+    // Animates the carousel, but only while something is actually moving.
+    //
+    // The previous version wrote localPosition, localScale and .color on every number on every frame,
+    // forever: Vector3.Lerp(current, target, t) approaches its target asymptotically and never
+    // arrives, so nothing ever counted as finished. The colour write is the expensive part -- it marks
+    // the text's vertex data dirty and schedules a mesh rebuild, so an idle carousel of N runs rebuilt
+    // N text meshes every single frame. Invisible on a desktop; permanent CPU time on the headset.
     void UpdateCarouselSmooth()
     {
+        float t = Time.deltaTime * moveSpeed;
+
         for (int i = 0; i < numbers.Count; i++)
         {
+            TextMeshPro number = numbers[i];
+            if (number == null)
+                continue;
+
             int offset = i - currentIndex;
 
             // Wrap-around effect
@@ -174,35 +190,42 @@ public class NumberCarousel : MonoBehaviour
             if (offset < -numbers.Count / 2) offset += numbers.Count;
 
             float angle = offset * curve;
+            float fade = Mathf.Clamp01(Mathf.Abs(offset) / 2f);
 
-            // Subtle curved placement
             Vector3 targetPos = new Vector3(
                 Mathf.Sin(angle) * spacing,
                 0,
                 Mathf.Cos(angle) * spacing * 0.25f
             );
+            Vector3 targetScale = Vector3.one * Mathf.Lerp(1f, scaleFactor, fade);
+            float targetAlpha = Mathf.Lerp(1f, fadeAmount, fade);
 
-            // Gentle scale difference
-            float targetScale = Mathf.Lerp(1f, scaleFactor, Mathf.Clamp01(Mathf.Abs(offset) / 2f));
-            float targetAlpha = Mathf.Lerp(1f, fadeAmount, Mathf.Clamp01(Mathf.Abs(offset) / 2f));
+            Transform tr = number.transform;
 
-            // Smooth position/scale fade
-            numbers[i].transform.localPosition = Vector3.Lerp(
-                numbers[i].transform.localPosition,
-                targetPos,
-                Time.deltaTime * moveSpeed
-            );
+            Vector3 position = tr.localPosition;
+            if ((position - targetPos).sqrMagnitude > SettleEpsilon * SettleEpsilon)
+                tr.localPosition = Vector3.Lerp(position, targetPos, t);
+            else if (position != targetPos)
+                tr.localPosition = targetPos; // snap once, then leave it alone
 
-            numbers[i].transform.localScale = Vector3.Lerp(
-                numbers[i].transform.localScale,
-                Vector3.one * targetScale,
-                Time.deltaTime * moveSpeed
-            );
+            Vector3 scale = tr.localScale;
+            if ((scale - targetScale).sqrMagnitude > SettleEpsilon * SettleEpsilon)
+                tr.localScale = Vector3.Lerp(scale, targetScale, t);
+            else if (scale != targetScale)
+                tr.localScale = targetScale;
 
-            // Fade side numbers
-            Color c = numbers[i].color;
-            c.a = Mathf.Lerp(c.a, targetAlpha, Time.deltaTime * moveSpeed);
-            numbers[i].color = c;
+            Color colour = number.color;
+            float alphaGap = Mathf.Abs(colour.a - targetAlpha);
+            if (alphaGap > SettleEpsilon)
+            {
+                colour.a = Mathf.Lerp(colour.a, targetAlpha, t);
+                number.color = colour;
+            }
+            else if (alphaGap > 0f)
+            {
+                colour.a = targetAlpha;
+                number.color = colour;
+            }
         }
     }
 

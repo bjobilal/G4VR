@@ -346,6 +346,9 @@ public class NewBehaviourScript : MonoBehaviour
             // Note: the file is NOT deleted after reading any more. It lives in RunCache, which is what
             // lets a second visit to the same run skip the download entirely; RunCache.Prepare evicts
             // the previous address's files, so this does not grow without bound.
+            // Normally a no-op: the menu measured every run before this scene was loaded.
+            RunBudget.EnsureEvaluated(customFile);
+
             ReadBIN(customFile, true);
         }
         else
@@ -422,21 +425,43 @@ public class NewBehaviourScript : MonoBehaviour
         UpdateScaleLabel();
     }
 
+    // Cached geometry root. This used to be a GameObject.Find("Scene") on EVERY Update -- a name
+    // search across the entire hierarchy, which includes the detector's ~11.6k pieces. Cheap enough on
+    // a desktop CPU in the editor; one of the larger uncategorised per-frame costs on the headset.
+    private Transform geometryRoot;
+    private float geometryRetryTimer;
+
+    private Transform GeometryRoot()
+    {
+        if (geometryRoot != null)
+            return geometryRoot;
+
+        // Missing (or destroyed). Retry about once a second rather than on every frame.
+        geometryRetryTimer -= Time.deltaTime;
+        if (geometryRetryTimer > 0f)
+            return null;
+
+        geometryRetryTimer = 1f;
+        GameObject found = GameObject.Find("Scene");
+        geometryRoot = found != null ? found.transform : null;
+        return geometryRoot;
+    }
+
     private void Update()
     {
-        GameObject Geometry = GameObject.Find("Scene");
-        if (Geometry != null)
+        Transform geometry = GeometryRoot();
+        if (geometry != null)
         {
             // Auto-fit scale (checkedScale) times the user-chosen scale. The tracks live under scaleRoot
             // (localScale = userScale) and their vertices are baked with checkedScale, so applying the same
             // product here keeps the geometry and tracks at an identical, invariant relative scale.
+            //
+            // Only written when it actually changes: assigning localScale dirties the whole subtree and
+            // forces Unity to recompute a world matrix for every piece under it, every frame.
             float geometryScale = checkedScale * userScaleValues[userScaleIndex];
-            Geometry.transform.localScale = new Vector3(geometryScale, geometryScale, geometryScale);
-            //appliedScaleToGeometry = true;
-            //UnityEngine.Debug.Log("[NewBehaviourScript] set scene scale to "+checkedScale);
+            if (!Mathf.Approximately(geometry.localScale.x, geometryScale))
+                geometry.localScale = new Vector3(geometryScale, geometryScale, geometryScale);
         }
-        //else 
-        //UnityEngine.Debug.Log("[NewBehaviourScript] Could not find Scene");
 
         UpdateScaleLabel();
 
@@ -454,24 +479,32 @@ public class NewBehaviourScript : MonoBehaviour
             UpdateMovie();
     }
 
+    // Reused across frames; GetRange used to allocate a fresh List on every batch, every frame.
+    private Matrix4x4[] markerBatch;
+
     void LateUpdate()
     {
-        if (drawMeshes == true)
-        {
-            for (int i = 0; i < markerMatrices.Count; i += 1023)
-            {
-                int count = Mathf.Min(1023, markerMatrices.Count - i);
+        if (!drawMeshes || markerMatrices.Count == 0)
+            return;
 
-                Graphics.DrawMeshInstanced(
-                    markerMesh,
-                    0,
-                    markerMat,
-                    markerMatrices.GetRange(i, count),
-                    null,
-                    UnityEngine.Rendering.ShadowCastingMode.Off,
-                    false
-                );
-            }
+        if (markerBatch == null)
+            markerBatch = new Matrix4x4[1023];
+
+        for (int i = 0; i < markerMatrices.Count; i += 1023)
+        {
+            int count = Mathf.Min(1023, markerMatrices.Count - i);
+            markerMatrices.CopyTo(i, markerBatch, 0, count);
+
+            Graphics.DrawMeshInstanced(
+                markerMesh,
+                0,
+                markerMat,
+                markerBatch,
+                count,
+                null,
+                UnityEngine.Rendering.ShadowCastingMode.Off,
+                false
+            );
         }
     }
     string ReadCString(BinaryReader reader)
@@ -1983,7 +2016,10 @@ public class NewBehaviourScript : MonoBehaviour
         public string VolumeAt(int i) => LookupString(volumeIDs, i);
 
         public GameObject trackObj; // parent gameobejct of each track
-        public List<GameObject> segments = new List<GameObject>(); // segments of the track 
+        // Only populated at full fidelity, and allocated only then: a reduced-fidelity run would
+        // otherwise create one empty List per track -- hundreds of thousands of them on a large file.
+        // Null means "this run has no per-step segments".
+        public List<GameObject> segments;
 
         // Where this track's entries sit in the shared `colliders` list. DrawTrack appends them in one
         // uninterrupted run, so the range is contiguous and the spatial index can name a whole track
@@ -2008,6 +2044,10 @@ public class NewBehaviourScript : MonoBehaviour
             public List<Vector3> positions;
             public List<float> times, energies, edeps, px, py, pz;
             public List<ushort> processIDs, volumeIDs;
+
+            // At reduced fidelity the energy, momentum and process lists are never allocated at all,
+            // so neither the parse peak nor the finished arrays pay for them.
+            public bool reduced;
         }
 
         private Scratch scratch;
@@ -2027,17 +2067,23 @@ public class NewBehaviourScript : MonoBehaviour
             int existing = positions.Length;
             int c = Mathf.Max(expected, 0) + existing;
 
+            // Energy, momentum and process index are read only by the per-step Analysis Board, which
+            // reduced fidelity does not offer -- there are no segment colliders to click. Skipping them
+            // saves 18 bytes of every step, both while parsing and for the life of the run.
+            bool reduced = RunBudget.SkipPerStepColliders;
+
             scratch = new Scratch
             {
+                reduced = reduced,
                 positions = new List<Vector3>(c),
                 times = new List<float>(c),
-                energies = new List<float>(c),
                 edeps = new List<float>(c),
-                px = new List<float>(c),
-                py = new List<float>(c),
-                pz = new List<float>(c),
-                processIDs = new List<ushort>(c),
                 volumeIDs = new List<ushort>(c),
+                energies = reduced ? null : new List<float>(c),
+                px = reduced ? null : new List<float>(c),
+                py = reduced ? null : new List<float>(c),
+                pz = reduced ? null : new List<float>(c),
+                processIDs = reduced ? null : new List<ushort>(c),
             };
 
             if (existing == 0)
@@ -2045,13 +2091,17 @@ public class NewBehaviourScript : MonoBehaviour
 
             scratch.positions.AddRange(positions);
             scratch.times.AddRange(times);
-            scratch.energies.AddRange(energies);
             scratch.edeps.AddRange(edeps);
+            scratch.volumeIDs.AddRange(volumeIDs);
+
+            if (reduced)
+                return;
+
+            scratch.energies.AddRange(energies);
             scratch.px.AddRange(px);
             scratch.py.AddRange(py);
             scratch.pz.AddRange(pz);
             scratch.processIDs.AddRange(processIDs);
-            scratch.volumeIDs.AddRange(volumeIDs);
         }
 
         public void AppendStep(Vector3 position, float time, float energy, float edep,
@@ -2063,13 +2113,17 @@ public class NewBehaviourScript : MonoBehaviour
 
             scratch.positions.Add(position);
             scratch.times.Add(time);
-            scratch.energies.Add(energy);
             scratch.edeps.Add(edep);
+            scratch.volumeIDs.Add(volumeID);
+
+            if (scratch.reduced)
+                return;
+
+            scratch.energies.Add(energy);
             scratch.px.Add(momentumX);
             scratch.py.Add(momentumY);
             scratch.pz.Add(momentumZ);
             scratch.processIDs.Add(processID);
-            scratch.volumeIDs.Add(volumeID);
         }
 
         // Freezes the accumulated steps into exact-sized arrays and releases the scratch lists.
@@ -2081,13 +2135,25 @@ public class NewBehaviourScript : MonoBehaviour
 
             positions = scratch.positions.ToArray();
             times = scratch.times.ToArray();
-            energies = scratch.energies.ToArray();
             edeps = scratch.edeps.ToArray();
-            px = scratch.px.ToArray();
-            py = scratch.py.ToArray();
-            pz = scratch.pz.ToArray();
-            processIDs = scratch.processIDs.ToArray();
             volumeIDs = scratch.volumeIDs.ToArray();
+
+            if (scratch.reduced)
+            {
+                energies = NoFloats;
+                px = NoFloats;
+                py = NoFloats;
+                pz = NoFloats;
+                processIDs = NoUShorts;
+            }
+            else
+            {
+                energies = scratch.energies.ToArray();
+                px = scratch.px.ToArray();
+                py = scratch.py.ToArray();
+                pz = scratch.pz.ToArray();
+                processIDs = scratch.processIDs.ToArray();
+            }
 
             scratch = null;
         }
@@ -2109,7 +2175,7 @@ public class NewBehaviourScript : MonoBehaviour
             processIDs = NoUShorts;
             volumeIDs = NoUShorts;
             movieTimes = NoFloats;
-            segments.Clear();
+            segments = null;
             trackObj = null;
             movieObj = null;
             movieTrail = null;
@@ -2123,8 +2189,19 @@ public class NewBehaviourScript : MonoBehaviour
             if (times == null || times.Length == 0)
                 return;
 
+            // Reduced fidelity: the per-step interaction object is ~2.5 KB and there is one per step,
+            // so a large run cannot afford them at all (see RunBudget). Skipping them costs only
+            // hover/click inspection of individual steps -- the unified track mesh is built from
+            // `positions` and needs none of this, so the tracks still draw, and edep, the movie, the
+            // cuts and every slider keep working exactly as before.
+            if (RunBudget.SkipPerStepColliders)
+                return;
+
             trackObj = new GameObject($"Track_{ID}");
             firstColliderIndex = colliders.Count;
+
+            if (segments == null)
+                segments = new List<GameObject>(positions.Length - 1);
 
             for (int i = 0; i < positions.Length - 1; i++)
             {
@@ -2181,6 +2258,10 @@ public class NewBehaviourScript : MonoBehaviour
 
         public void OnHoverEntered(int i)
         {
+            if (i < 0 || i >= energies.Length)
+                return; // reduced fidelity drops the per-step energies these panels read
+
+
             GameObject gobj = GameObject.Find("XR Origin (XR Rig)");
             GameObject panel = gobj.transform.GetChild(0).GetChild(0).GetChild(0).gameObject;
             panel.SetActive(true);
@@ -2190,6 +2271,9 @@ public class NewBehaviourScript : MonoBehaviour
 
         public void onHit(int i)
         {
+            if (i < 0 || i >= energies.Length)
+                return; // reduced fidelity drops the per-step data this board shows
+
             //Debug.Log(i);
             GameObject board = GameObject.Find("Analysis Board");
             GameObject analysis = board.transform.GetChild(0).gameObject;
@@ -2359,6 +2443,15 @@ public class TrackMeshRenderer : MonoBehaviour
         var mr = gameObject.AddComponent<MeshRenderer>();
 
         mf.sharedMesh = mesh;
+
+        // Sprites/Default: alpha-blended, ZWrite off, transparent queue.
+        //
+        // An opaque vertex-colour shader was tried here to save the blending cost and gain early-z.
+        // It made the detector geometry vanish: that geometry is drawn transparent at renderQueue
+        // 3000 with ZWrite off, so once the tracks wrote depth from the Geometry queue, every part of
+        // the detector further away than a track pixel -- which is most of it, since the detector
+        // encloses the tracks -- was z-rejected. Transparent-over-transparent is what keeps both
+        // visible, so this stays as it is.
         ownedMaterial = new Material(Shader.Find("Sprites/Default"));
         mr.sharedMaterial = ownedMaterial;
     }
@@ -2483,12 +2576,18 @@ public class TrackMeshRenderer : MonoBehaviour
         // Each visible segment contributes exactly two indices, so the prefix count is positional.
         int indexCount = (Mathf.Clamp(timeIndex, 0, visibleTimes.Count - 1) + 1) * 2;
 
-        mesh.SetIndices(
-            indices,
+        // Only the sub-mesh's draw range changes; the index buffer on the GPU is already correct.
+        //
+        // This used to call SetIndices, which re-uploaded the entire index list on every movement of
+        // the time slider -- up to eight million ints, tens of megabytes across the bus, to express
+        // what is really just a different element count. That is survivable over PCIe in the editor
+        // and badly not so on the headset.
+        mesh.SetSubMesh(
             0,
-            indexCount,
-            MeshTopology.Lines,
-            0
+            new UnityEngine.Rendering.SubMeshDescriptor(0, indexCount, MeshTopology.Lines),
+            UnityEngine.Rendering.MeshUpdateFlags.DontRecalculateBounds |
+            UnityEngine.Rendering.MeshUpdateFlags.DontValidateIndices |
+            UnityEngine.Rendering.MeshUpdateFlags.DontNotifyMeshUsers
         );
     }
 
@@ -2505,6 +2604,13 @@ public class TrackMeshRenderer : MonoBehaviour
         indices.Clear();
         visibleTimes.Clear();
 
+        // Exact capacity: growing by doubling would transiently hold two copies of a multi-million
+        // element array, and the peak is what the Boehm collector keeps reserved forever.
+        if (indices.Capacity < allSegments.Count * 2)
+            indices.Capacity = allSegments.Count * 2;
+        if (visibleTimes.Capacity < allSegments.Count)
+            visibleTimes.Capacity = allSegments.Count;
+
         foreach (var seg in allSegments)
         {
             if (cutStates.TryGetValue(seg.particleId, out bool visible) && !visible)
@@ -2516,6 +2622,12 @@ public class TrackMeshRenderer : MonoBehaviour
         }
 
         mesh.SetIndices(indices, MeshTopology.Lines, 0);
+
+        // The mesh owns the index buffer now and SetTimeIndex works off sub-mesh ranges, so this list
+        // is pure build scratch. Releasing it keeps 8 bytes per step off the managed heap -- tens of MB
+        // on a large run, which IL2CPP's collector would never hand back to the OS.
+        indices.Clear();
+        indices.TrimExcess();
 
         if (time_slider != null)
             time_slider.maxValue = Mathf.Max(0, visibleTimes.Count - 1);

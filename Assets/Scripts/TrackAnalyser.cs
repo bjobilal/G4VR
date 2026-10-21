@@ -397,6 +397,12 @@ public class TrackAnalyser : MonoBehaviour
                 {
                     // track.Value is an instance of the Track class
                     NewBehaviourScript.Track currTrack = track.Value;
+
+                    // Null at reduced fidelity, where no per-step segments were built. Custom scenes
+                    // never reach this method anyway -- they attribute edep by volume ID instead.
+                    if (currTrack.segments == null)
+                        continue;
+
                     for (int i = 0; i < currTrack.segments.Count; i++)
                     {
                         GameObject segmentObject = currTrack.segments[i];

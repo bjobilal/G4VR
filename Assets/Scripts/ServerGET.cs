@@ -53,6 +53,12 @@ public class ServerGET : MonoBehaviour
 
     bool loadStatus;
 
+    // Set by ShowError. `loadStatus` means only "is the scene safe to enter", and several paths clear
+    // it after already putting a specific message on screen -- a refused run, a bad URL, geometry that
+    // would not parse. Without this flag the generic "could not be reached" fallback in InitializeFile
+    // overwrites every one of them, so a size refusal reads as a network failure.
+    bool errorDisplayed;
+
     public static string GET_URL; 
 
 
@@ -240,6 +246,8 @@ public class ServerGET : MonoBehaviour
         }*/
         try
         {
+            errorDisplayed = false;
+
             // this is to test that the gameobject is actually parsable
             GameManager.instance.customscene = name;
             GameManager.instance.URL = URL;
@@ -252,11 +260,14 @@ public class ServerGET : MonoBehaviour
             // RunManager falls back to downloading a missing run on demand, exactly as before.
             if (loadStatus) await PrefetchRuns(URL);
 
-            if (loadStatus) SceneManager.LoadScene("Custom");
-            else
+            if (loadStatus)
             {
+                SceneManager.LoadScene("Custom");
+            }
+            else if (!errorDisplayed)
+            {
+                // Only reached when something failed without reporting why.
                 ShowError("Connection Lost", "The address could not be reached. Please check that you are on the same network and traffic is allowed");
-
             }
             
 
@@ -395,6 +406,9 @@ public class ServerGET : MonoBehaviour
         // asking the server from inside the scene, not silently reuse a count from another server.
         RunCache.SetKnownRuns(null);
 
+        // Likewise the fidelity verdict: it belongs to the experiment we are about to load.
+        RunBudget.Reset();
+
         int[] runs = await RunCache.ListRuns(parentURL);
 
         if (runs == null)
@@ -433,6 +447,38 @@ public class ServerGET : MonoBehaviour
 
         RunCache.SetKnownRuns(runs);
 
+        // Every run is now on disk, so measure them all before the analysis scene is ever loaded.
+        // Walking the binaries is pure file I/O, so it goes on a worker thread -- a freeze of even a
+        // few hundred ms is unpleasant in a headset.
+        statusText.text = "Checking run sizes...";
+
+        List<string> cachedRuns = new List<string>();
+        foreach (int runNumber in runs)
+        {
+            string cachedPath = RunCache.PathIfPresent(parentURL, runNumber);
+            if (cachedPath != null)
+                cachedRuns.Add(cachedPath);
+        }
+
+        RunBudget.Fidelity fidelity = await Task.Run(() => RunBudget.Evaluate(cachedRuns));
+
+        if (fidelity == RunBudget.Fidelity.Refused)
+        {
+            // Refuse here rather than let the OS kill us partway through loading, which would look
+            // like a crash to the user and tell them nothing.
+            // We are not entering the analysis scene, so drop the geometry we just imported rather
+            // than leaving it resident in the menu while the user picks something else.
+            loadStatus = false;
+            SessionMemory.ReleaseEverything();
+            ShowError("Run Too Large", RunBudget.DescribeRefusal());
+            return;
+        }
+
+        if (fidelity == RunBudget.Fidelity.MeshOnly)
+        {
+            Debug.LogWarning("[SERVER-GET] Loading at reduced fidelity; per-step interaction will be disabled.");
+        }
+
         long megabytes = RunCache.CachedBytes(parentURL) / (1024 * 1024);
         Debug.Log($"[SERVER-GET] Cached {runs.Length - failed}/{runs.Length} runs ({megabytes} MB on disk).");
 
@@ -459,6 +505,7 @@ public class ServerGET : MonoBehaviour
 
     private void ShowError(string header, string message)
     {
+        errorDisplayed = true;
         errorScreen.SetActive(true);
         loadingScreen.SetActive(false);
         error_header.text = header;

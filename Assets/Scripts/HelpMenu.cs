@@ -1,4 +1,4 @@
-using TMPro;
+﻿using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -18,6 +18,15 @@ public class HelpMenu : MonoBehaviour
     public TextMeshProUGUI bodyText;
     public ScrollRect scrollRect;
     public RectTransform contentRect;
+
+    // The panel's labels can be either TMP or legacy UI Text -- the Main Menu panel uses legacy Text
+    // for its header and body, which is why `bodyText` above serialises as null there. Whichever of
+    // each pair is set gets written, so both styles work and neither has to be converted.
+    public Text bodyTextLegacy;
+    public TextMeshProUGUI headerText;
+    public Text headerTextLegacy;
+
+    private bool labelsResolved;
 
     [Header("Content")]
     [Tooltip("The controls diagram pinned to the top of the panel.")]
@@ -43,8 +52,69 @@ public class HelpMenu : MonoBehaviour
             controlsImage.enabled = controlsSprite != null;
         }
 
-        if (bodyText != null)
-            bodyText.text = body;
+        WriteText(bodyText, bodyTextLegacy, body);
+    }
+
+    // Sets the panel's title. Resolves the label by name if it was never wired, so a panel built from
+    // the prefab works without the reference having been filled in.
+    public void SetHeader(string value)
+    {
+        ResolveLabels();
+        WriteText(headerText, headerTextLegacy, value);
+    }
+
+    // Sets the panel's body text, and keeps `body` in step so a later Apply() does not revert it.
+    public void SetBody(string value)
+    {
+        ResolveLabels();
+        body = value;
+        WriteText(bodyText, bodyTextLegacy, value);
+    }
+
+    private static void WriteText(TextMeshProUGUI tmp, Text legacy, string value)
+    {
+        if (tmp != null)
+            tmp.text = value;
+
+        if (legacy != null)
+            legacy.text = value;
+    }
+
+    // Finds the header and body labels by name when they were not wired explicitly.
+    //
+    // Deliberately NOT called from Apply(): a panel whose text was authored directly in the scene
+    // would otherwise have it silently overwritten by the `body` field the first time it opened.
+    // Only the explicit SetHeader/SetBody calls resolve.
+    private void ResolveLabels()
+    {
+        if (labelsResolved || panel == null)
+            return;
+
+        labelsResolved = true;
+
+        if (headerText == null && headerTextLegacy == null)
+            FindLabel("Header", out headerText, out headerTextLegacy);
+
+        if (bodyText == null && bodyTextLegacy == null)
+            FindLabel("Body", out bodyText, out bodyTextLegacy);
+    }
+
+    private void FindLabel(string childName, out TextMeshProUGUI tmp, out Text legacy)
+    {
+        tmp = null;
+        legacy = null;
+
+        foreach (Transform t in panel.GetComponentsInChildren<Transform>(true))
+        {
+            if (t.name != childName)
+                continue;
+
+            tmp = t.GetComponentInChildren<TextMeshProUGUI>(true);
+            legacy = t.GetComponentInChildren<Text>(true);
+
+            if (tmp != null || legacy != null)
+                return;
+        }
     }
 
     // The VerticalLayoutGroup decides the diagram's width; its height has to follow from the sprite's

@@ -51,9 +51,31 @@ public class InstancedGeometryDrawer : MonoBehaviour
     // else stays instanced, so the detector keeps costing ~a dozen draw calls instead of ~11.6k.
     private HashSet<GameObject> excluded;
 
+    // The world-matrix chunks only go stale when the model actually moves. Idle -- which is most of
+    // the time -- this saves ~11.6k matrix multiplies every frame.
+    private Matrix4x4 lastRootToWorld;
+    private bool chunksValid;
+
     // Drawn instead of each group's own material when set. Edep mode uses one shared faint material for
     // the whole un-hit detector, which is exactly the case instancing handles best.
     private Material overrideMaterial;
+
+    // Drawn when nothing is overriding. Set by CustomManager to a Standard-shader material.
+    //
+    // The imported glTF materials CANNOT be used for the instanced draw in a player build. The glTF
+    // shader declares its transparency keywords as
+    //     #pragma shader_feature_local _ _ALPHATEST_ON _ALPHABLEND_ON _ALPHAPREMULTIPLY_ON
+    // and shader_feature variants are stripped at build time unless some Material ASSET in the build
+    // already has the keyword enabled. These materials are created at runtime by glTFast and the
+    // keyword is set at runtime, so Unity's build pipeline never sees it: the _ALPHABLEND_ON variant
+    // -- and with it the _ALPHABLEND_ON x INSTANCING_ON combination this draw needs -- is simply
+    // absent from the APK, and the geometry does not render. The editor compiles variants on demand,
+    // which is why it only fails on device.
+    //
+    // Standard is a built-in shader listed in Always Included Shaders and ships its full variant set,
+    // so a Standard-based material draws correctly instanced on the headset -- as edep mode already
+    // demonstrates, since that is exactly what it overrides with.
+    public Material defaultMaterial;
 
     // Scans every MeshRenderer under rootObject, groups instances by (mesh, submesh, material), captures their
     // transforms relative to rootObject, disables the MeshRenderers, and begins drawing via instancing.
@@ -101,6 +123,7 @@ public class InstancedGeometryDrawer : MonoBehaviour
         excluded = null;
         overrideMaterial = null;
         instancingActive = true;
+        chunksValid = false;
 
         RebuildDrawSets();
         ApplyRendererStates();
@@ -181,6 +204,7 @@ public class InstancedGeometryDrawer : MonoBehaviour
     public void SetExcluded(HashSet<GameObject> pieces)
     {
         excluded = (pieces != null && pieces.Count > 0) ? pieces : null;
+        chunksValid = false;
 
         RebuildDrawSets();
         ApplyRendererStates();
@@ -233,21 +257,36 @@ public class InstancedGeometryDrawer : MonoBehaviour
         if (!instancingActive || groups.Count == 0 || root == null)
             return;
 
-        // Rebuild world matrices from root-relative ones each frame so moving/scaling the whole model
-        // (e.g. a VR grab on the root) keeps the instanced geometry aligned. ~11k cheap matrix multiplies.
+        // World matrices are rebuilt from the root-relative ones only when the model has actually moved
+        // or been rescaled (a VR grab, the scale slider). The draw calls still have to be issued every
+        // frame -- DrawMeshInstanced is immediate mode -- but the ~11.6k matrix multiplies behind them
+        // do not.
         Matrix4x4 rootToWorld = root.localToWorldMatrix;
+        bool rebuild = !chunksValid || rootToWorld != lastRootToWorld;
+
+        if (rebuild)
+        {
+            lastRootToWorld = rootToWorld;
+            chunksValid = true;
+        }
 
         foreach (Group g in groups)
         {
-            Material material = overrideMaterial != null ? overrideMaterial : g.material;
+            Material material = overrideMaterial != null ? overrideMaterial
+                              : defaultMaterial != null ? defaultMaterial
+                              : g.material;
 
             int idx = 0;
             for (int c = 0; c < g.worldChunks.Length; c++)
             {
                 Matrix4x4[] chunk = g.worldChunks[c];
                 int count = g.chunkCounts[c];
-                for (int i = 0; i < count; i++)
-                    chunk[i] = rootToWorld * g.draw[idx++];
+
+                if (rebuild)
+                {
+                    for (int i = 0; i < count; i++)
+                        chunk[i] = rootToWorld * g.draw[idx++];
+                }
 
                 Graphics.DrawMeshInstanced(g.mesh, g.subMesh, material, chunk, count, null,
                     ShadowCastingMode.Off, false);
