@@ -32,14 +32,80 @@ public class TrackAnalyser : MonoBehaviour
     //private static bool on_analysis; // if on_analysis is true -> you show edeps. if on_analysis is false -> you go back to tracks
 
 
-    public static Dictionary<string, Dictionary<long, NewBehaviourScript.Track>> trackInfo = NewBehaviourScript.trackInfo;
+    // A property, not a copied field: a static field initialiser captures the dictionary reference
+    // exactly once at class-load time, which silently desynchronises the moment the other side assigns
+    // a new dictionary rather than clearing the existing one.
+    public static Dictionary<string, Dictionary<long, NewBehaviourScript.Track>> trackInfo
+        => NewBehaviourScript.trackInfo;
 
     public static Dictionary<GameObject, List<double>> edep_bypiece = new Dictionary<GameObject, List<double>>();
+
+    // Original per-piece meshes captured at GLB import time, BEFORE StaticBatchingUtility.Combine
+    // rewrites each MeshFilter.sharedMesh to point into the shared combined buffer. MeshColliders must
+    // use these originals for collision/click-to-inspect; the combined buffer would give every piece
+    // the geometry of the whole scene. Populated by ServerGET/CustomManager; survives the scene change
+    // because the geometry lives under the DontDestroyOnLoad "Scene" object.
+    public static Dictionary<GameObject, Mesh> originalMeshes = new Dictionary<GameObject, Mesh>();
 
     private static Dictionary<GameObject, UnityEngine.Color> originalColors = new Dictionary<GameObject, UnityEngine.Color>();
 
     // Global dictionary to store original materials
     private static Dictionary<GameObject, Material> originalMaterials = new Dictionary<GameObject, Material>();
+
+    // Every Material this class instantiates for edep coloring. Unity never reclaims these on its own,
+    // and edep mode creates one per geometry piece (~11.6k on the detector geometries), so each
+    // entry/exit cycle used to strand that many materials. Destroyed by ReleaseColoringMaterials().
+    private static readonly List<Material> coloringMaterials = new List<Material>();
+
+    // The one shared material the instancer draws the un-hit detector with while in edep mode.
+    private static Material faintMaterial;
+
+    // Builds a transparent edep material and records it for later destruction.
+    private static Material CreateColoringMaterial(UnityEngine.Color color)
+    {
+        Material mat = new Material(Shader.Find("Standard"));
+        mat.color = color;
+        mat.SetFloat("_Mode", 3f); // 3 = transparent
+        mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+        mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+        mat.SetInt("_ZWrite", 0);
+        mat.DisableKeyword("_ALPHATEST_ON");
+        mat.EnableKeyword("_ALPHABLEND_ON");
+        mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        mat.renderQueue = 3000;
+
+        coloringMaterials.Add(mat);
+        return mat;
+    }
+
+    private static void ReleaseColoringMaterials()
+    {
+        foreach (Material mat in coloringMaterials)
+            if (mat != null)
+                Destroy(mat);
+
+        coloringMaterials.Clear();
+    }
+
+    // Run-scoped reset, for switching runs inside one scene. Deliberately keeps originalMeshes: the
+    // detector geometry outlives a run switch, and those meshes are what its colliders are built from.
+    public static void ReleaseRunState()
+    {
+        faintMaterial = null;
+        ReleaseColoringMaterials();
+        edep_bypiece.Clear();
+        originalColors.Clear();
+        originalMaterials.Clear();
+    }
+
+    // Full reset, for leaving the scene. originalMeshes holds a reference to every mesh of the loaded
+    // GLB, so until it is cleared Resources.UnloadUnusedAssets can never reclaim the old geometry.
+    public static void ResetStaticState()
+    {
+        ReleaseRunState();
+        originalMeshes.Clear();
+        geometry = null;
+    }
 
     // Call this before coloring
     private static void PrepareForColoring(GameObject obj, UnityEngine.Color targetColor)
@@ -47,28 +113,16 @@ public class TrackAnalyser : MonoBehaviour
         Renderer rend = obj.GetComponent<Renderer>();
         if (rend == null) return;
 
-        // Store original material if not already stored
+        // sharedMaterial, not material: *reading* Renderer.material instantiates a private copy, so
+        // capturing the original through it created a second throwaway material per piece on top of the
+        // coloring one. Writing through sharedMaterial also keeps the pieces sharing the GLB's original
+        // materials on restore, which is what InstancedGeometryDrawer groups by.
         if (!originalMaterials.ContainsKey(obj))
         {
-            originalMaterials[obj] = rend.material;
+            originalMaterials[obj] = rend.sharedMaterial;
         }
 
-        // Create a new material based on Standard shader
-        Material colorMat = new Material(Shader.Find("Standard"));
-        colorMat.color = targetColor;
-
-        // Optional: Make it slightly transparent
-        colorMat.SetFloat("_Mode", 3f); // 3 = transparent
-        colorMat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-        colorMat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-        colorMat.SetInt("_ZWrite", 0);
-        colorMat.DisableKeyword("_ALPHATEST_ON");
-        colorMat.EnableKeyword("_ALPHABLEND_ON");
-        colorMat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-        colorMat.renderQueue = 3000;
-
-        // Assign new material
-        rend.material = colorMat;
+        rend.sharedMaterial = CreateColoringMaterial(targetColor);
     }
 
     // Call this to restore the original material
@@ -79,7 +133,7 @@ public class TrackAnalyser : MonoBehaviour
 
         if (originalMaterials.ContainsKey(obj))
         {
-            rend.material = originalMaterials[obj];
+            rend.sharedMaterial = originalMaterials[obj];
             originalMaterials.Remove(obj);
         }
     }
@@ -109,6 +163,12 @@ public class TrackAnalyser : MonoBehaviour
         AddGeometries();
         SceneSwitch(true);
         LogEdep();
+
+        // The CSV example scenes attribute edep by collider overlap, which means LogEdep had to switch
+        // the segment colliders back on. Put them away again before entering the mode proper.
+        if (!NewBehaviourScript.hasVolumeInfo)
+            NBS_instance.ForceAllTrackCollidersOff();
+
         Coloring();
 
         // next time you call this button, 
@@ -134,16 +194,18 @@ public class TrackAnalyser : MonoBehaviour
     private static void AddGeometries() //  function to add children of input geom to edep_bypiece as keys
     {
         edep_bypiece.Clear();
-        for (int i =0; i<geometry.transform.childCount; i++)
-        {
-            if (geometry.transform.GetChild(i).gameObject.activeSelf && !edep_bypiece.ContainsKey(geometry.transform.GetChild(i).gameObject))
-            {
-                edep_bypiece[geometry.transform.GetChild(i).gameObject] = new List<double>();
-                geometry.transform.GetChild(i).AddComponent<MeshCollider>();
-                geometry.transform.GetChild(i).GetComponent<MeshCollider>().convex = true;
-            }
-        }
 
+        // The collider work is left entirely to PrepareGeometryColliders. This used to call
+        // AddComponent<MeshCollider> unconditionally, guarded only by edep_bypiece -- which is cleared
+        // on the line above -- so every re-entry into edep mode stacked ANOTHER convex MeshCollider on
+        // every piece. Convex hull cooking is expensive, so entering edep got slower each time.
+        Transform root = geometry.transform;
+        for (int i = 0; i < root.childCount; i++)
+        {
+            GameObject piece = root.GetChild(i).gameObject;
+            if (piece.activeSelf && !edep_bypiece.ContainsKey(piece))
+                edep_bypiece[piece] = new List<double>();
+        }
     }
 
     public static void LogEdep()
@@ -178,6 +240,9 @@ public class TrackAnalyser : MonoBehaviour
             if (tempCollider == null)
             {
                 tempCollider = temp.AddComponent<MeshCollider>();
+                // Use the pre-batch original mesh; MeshFilter.sharedMesh may now be the combined buffer.
+                if (originalMeshes.TryGetValue(temp, out Mesh originalMesh))
+                    tempCollider.sharedMesh = originalMesh;
                 tempCollider.convex = true;
             }
             if (!tempCollider.enabled)
@@ -204,15 +269,17 @@ public class TrackAnalyser : MonoBehaviour
     // all share one name -- those get disambiguated geometrically in ResolveInstance.
     private static void LogEdepByVolumeID()
     {
-        Dictionary<string, List<GameObject>> geoGroupsByName = new Dictionary<string, List<GameObject>>();
+        // Colliders are resolved once here, not per step. ResolveInstance runs inside a loop over every
+        // step of every track, so a GetComponent<Collider>() in there was millions of lookups.
+        Dictionary<string, List<Candidate>> geoGroupsByName = new Dictionary<string, List<Candidate>>();
         foreach (GameObject g in edep_bypiece.Keys)
         {
-            if (!geoGroupsByName.TryGetValue(g.name, out List<GameObject> group))
+            if (!geoGroupsByName.TryGetValue(g.name, out List<Candidate> group))
             {
-                group = new List<GameObject>();
+                group = new List<Candidate>();
                 geoGroupsByName[g.name] = group;
             }
-            group.Add(g);
+            group.Add(new Candidate { piece = g, collider = g.GetComponent<Collider>() });
         }
 
         HashSet<string> unresolved = new HashSet<string>();
@@ -223,24 +290,28 @@ public class TrackAnalyser : MonoBehaviour
             foreach (var track in typeEntry.Value)
             {
                 NewBehaviourScript.Track currTrack = track.Value;
-                int count = Mathf.Min(currTrack.volumeNames.Count, currTrack.edeps.Count);
+                int count = currTrack.StepCount;
 
                 for (int i = 0; i < count; i++)
                 {
-                    string volumeName = currTrack.volumeNames[i];
+                    // Resolved from the run's string table on demand; the per-step name lists this used
+                    // to read are gone (see NewBehaviourScript.Track).
+                    string volumeName = currTrack.VolumeAt(i);
                     if (string.IsNullOrEmpty(volumeName))
                         continue;
 
-                    if (!geoGroupsByName.TryGetValue(volumeName, out List<GameObject> candidates))
+                    if (!geoGroupsByName.TryGetValue(volumeName, out List<Candidate> candidates))
                     {
                         if (unresolved.Add(volumeName))
                             Debug.LogWarning($"[TRACK-ANALYSER] Step reports volume '{volumeName}' with no matching geometry piece; edep not attributed.");
                         continue;
                     }
 
+                    // Track positions are baked in the scale root's local space; the geometry colliders live
+                    // under that (possibly user-scaled) root, so compare in world space.
                     GameObject target = candidates.Count == 1
-                        ? candidates[0]
-                        : ResolveInstance(candidates, currTrack.positions[i], volumeName, fallbackWarned);
+                        ? candidates[0].piece
+                        : ResolveInstance(candidates, ToWorld(currTrack.positions[i]), volumeName, fallbackWarned);
 
                     if (target != null)
                         edep_bypiece[target].Add(currTrack.edeps[i]);
@@ -249,25 +320,40 @@ public class TrackAnalyser : MonoBehaviour
         }
     }
 
+    // Transforms a baked (scale-root-local) track position into world space, matching the geometry colliders
+    // which are parented under the user-scalable root. Falls back to identity when no root exists.
+    private static Vector3 ToWorld(Vector3 rootLocalPosition)
+    {
+        return NewBehaviourScript.scaleRoot != null
+            ? NewBehaviourScript.scaleRoot.TransformPoint(rootLocalPosition)
+            : rootLocalPosition;
+    }
+
     // Disambiguates several same-named geometry pieces (e.g. the many identical cells of a segmented
     // calorimeter) by testing which instance's collider actually contains the step's recorded
     // position. Colliders here are always convex (see PrepareGeometryColliders), so Collider.ClosestPoint
     // returns the point itself when it's inside -- the standard Unity idiom for point-in-collider.
-    private static GameObject ResolveInstance(List<GameObject> candidates, Vector3 position, string volumeName, HashSet<string> fallbackWarned)
+    private struct Candidate
+    {
+        public GameObject piece;
+        public Collider collider;
+    }
+
+    private static GameObject ResolveInstance(List<Candidate> candidates, Vector3 position, string volumeName, HashSet<string> fallbackWarned)
     {
         const float containmentSqrTolerance = 1e-6f;
 
         // Fast path: an AABB check is far cheaper than Collider.ClosestPoint, and only candidates
         // whose bounds contain the point can possibly be the true containing instance.
-        foreach (GameObject candidate in candidates)
+        foreach (Candidate candidate in candidates)
         {
-            Collider collider = candidate.GetComponent<Collider>();
+            Collider collider = candidate.collider;
             if (collider == null || !collider.bounds.Contains(position))
                 continue;
 
             Vector3 closestPoint = collider.ClosestPoint(position);
             if ((closestPoint - position).sqrMagnitude <= containmentSqrTolerance)
-                return candidate;
+                return candidate.piece;
         }
 
         // Fallback: no instance claimed exact containment (float precision at a shared boundary, or a
@@ -278,17 +364,16 @@ public class TrackAnalyser : MonoBehaviour
         GameObject closest = null;
         float closestSqrDist = float.PositiveInfinity;
 
-        foreach (GameObject candidate in candidates)
+        foreach (Candidate candidate in candidates)
         {
-            Collider collider = candidate.GetComponent<Collider>();
-            if (collider == null)
+            if (candidate.collider == null)
                 continue;
 
-            float sqrDist = (collider.ClosestPoint(position) - position).sqrMagnitude;
+            float sqrDist = (candidate.collider.ClosestPoint(position) - position).sqrMagnitude;
             if (sqrDist < closestSqrDist)
             {
                 closestSqrDist = sqrDist;
-                closest = candidate;
+                closest = candidate.piece;
             }
         }
 
@@ -312,6 +397,12 @@ public class TrackAnalyser : MonoBehaviour
                 {
                     // track.Value is an instance of the Track class
                     NewBehaviourScript.Track currTrack = track.Value;
+
+                    // Null at reduced fidelity, where no per-step segments were built. Custom scenes
+                    // never reach this method anyway -- they attribute edep by volume ID instead.
+                    if (currTrack.segments == null)
+                        continue;
+
                     for (int i = 0; i < currTrack.segments.Count; i++)
                     {
                         GameObject segmentObject = currTrack.segments[i];
@@ -375,13 +466,18 @@ public class TrackAnalyser : MonoBehaviour
             .Where(total => total >= edepThreshold)
             .ToList();
 
-        if (allTotalEdeps.Count == 0)
-            return;
+        bool anyAboveThreshold = allTotalEdeps.Count > 0;
 
-        double minEdep = allTotalEdeps.Min();
-        double maxEdep = allTotalEdeps.Max();
+        double minEdep = anyAboveThreshold ? allTotalEdeps.Min() : 0.0;
+        double maxEdep = anyAboveThreshold ? allTotalEdeps.Max() : 0.0;
         double range = maxEdep - minEdep;
         if (range == 0) range = 1e-6; // prevent division by zero
+
+        // Pieces that need a material of their own, i.e. those that actually received energy. The rest
+        // keep the shared faint look the instancer is already drawing, so both the material allocations
+        // and the individual draw calls now scale with how much of the detector the beam touched rather
+        // than with how many pieces the detector has.
+        HashSet<GameObject> lit = new HashSet<GameObject>();
 
         // Iterate through each geometry
         foreach (var geo in edep_bypiece)
@@ -389,14 +485,14 @@ public class TrackAnalyser : MonoBehaviour
             GameObject obj = geo.Key;
             double totaledep = geo.Value.Sum();
 
+            // No deposition: left to the instancer's faint material. Nothing to allocate, nothing to draw
+            // separately.
+            if (totaledep <= 0)
+                continue;
+
             UnityEngine.Color targetColor;
 
-            if (totaledep <= 0)
-            {
-                // No deposition == faint white
-                targetColor = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
-            }
-            else if (totaledep < edepThreshold)
+            if (totaledep < edepThreshold)
             {
                 // Very small deposition → slightly less faint white
                 targetColor = new UnityEngine.Color(1f, 1f, 1f, 0.15f);
@@ -438,11 +534,18 @@ public class TrackAnalyser : MonoBehaviour
 
             // Apply the color by swapping to a Standard shader material
             PrepareForColoring(obj, targetColor);
+            lit.Add(obj);
         }
+
+        // Hand just these pieces back to their own MeshRenderers; the detector stays instanced.
+        if (InstancedGeometryDrawer.Active != null)
+            InstancedGeometryDrawer.Active.SetExcluded(lit);
+
+        Debug.Log($"[TRACK-ANALYSER] Edep mode: {lit.Count} of {edep_bypiece.Count} pieces recolored; the rest stay instanced.");
 
         // Update color gradient UI
         GameObject color_board = GameObject.Find("Edep Gradient");
-        if (color_board != null)
+        if (color_board != null && anyAboveThreshold)
         {
             color_board.transform.GetChild(0).gameObject.SetActive(true);
             color_board.transform.GetChild(0).GetChild(0).GetComponent<TMPro.TextMeshProUGUI>().text = maxEdep.ToString("0.000E+0") + " MeV";
@@ -457,49 +560,34 @@ public class TrackAnalyser : MonoBehaviour
         {
             // --- Switching TO Edep scene ---
 
+            // Keep the instancer running. Edep mode only needs an individual material on the pieces that
+            // actually received energy -- usually a small fraction of the detector. Everything else can
+            // share one faint material, which is precisely the case instancing handles best. This used
+            // to call SetInstancingActive(false), waking ~11.6k MeshRenderers and taking the idle scene
+            // from ~a dozen draw calls to over twenty thousand, every frame, for the whole session.
+            //
+            // Nothing is excluded yet: until LogEdep has run we do not know which pieces were hit, so
+            // the whole detector draws faint. Coloring() narrows the set once the edeps are known.
+            if (InstancedGeometryDrawer.Active != null)
+            {
+                faintMaterial = CreateColoringMaterial(new UnityEngine.Color(1f, 1f, 1f, 0.05f));
+                InstancedGeometryDrawer.Active.SetOverrideMaterial(faintMaterial);
+                InstancedGeometryDrawer.Active.SetExcluded(null);
+            }
+
             originalMaterials.Clear();
 
-            // deactivate NN algorithm for as long as in EDEP mode
-
-            NBS_instance.overriden = true;
-
-            foreach (var geo in edep_bypiece)
-            {
-                GameObject obj = geo.Key;
-                Renderer rend = obj.GetComponent<Renderer>();
-                if (rend != null)
-                {
-                    if (!originalMaterials.ContainsKey(obj))
-                        originalMaterials[obj] = rend.material;
-
-                    Material mat = new Material(Shader.Find("Standard"));
-                    mat.color = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
-                    mat.color = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
-                    mat.SetFloat("_Mode", 3f); // Transparent mode
-                    mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-                    mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-                    mat.SetInt("_ZWrite", 0);
-                    mat.DisableKeyword("_ALPHATEST_ON");
-                    mat.EnableKeyword("_ALPHABLEND_ON");
-                    mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-                    mat.renderQueue = 3000;
-                    rend.material = mat;
-                }
-            }
+            // Park the track-collider proximity system for the duration of edep mode. Track segments
+            // are not inspectable here -- geometry pieces are -- so the colliders have no job.
+            //
+            // This used to set NBS_instance.overriden = true, whose branch in Recompute ACTIVATES every
+            // segment GameObject in the run, then re-ran that loop every 5 seconds. The two loops that
+            // used to follow this comment then called GetComponent<Collider>() on each of those
+            // millions of segments to switch the collider off again. Between them, that was both the
+            // stall on entering edep mode and the permanent lag once inside it.
+            NBS_instance.SuspendTrackColliders(true);
 
             SceneSwitchButton.transform.GetComponentInChildren<TMPro.TextMeshProUGUI>().text = "Tracks";
-
-            foreach (var typeEntry in trackInfo)
-            {
-                foreach (var track in typeEntry.Value)
-                {
-                    NewBehaviourScript.Track currTrack = track.Value;
-                    foreach (var segment in currTrack.segments)
-                    {
-                        segment.GetComponent<Collider>().enabled = false;
-                    }
-                }
-            }
 
             if (carousel != null) carousel.SetActive(false);
             time_board.SetActive(false);
@@ -509,27 +597,24 @@ public class TrackAnalyser : MonoBehaviour
         {
             // --- Switching BACK from Edep scene ---
 
-            // reactivate NN algorithm
+            // Restart the proximity collider system. It re-activates the segments near the camera by
+            // itself on the next frame, so there is no need to walk every segment in the run.
+            NBS_instance.SuspendTrackColliders(false);
 
-            NBS_instance.overriden = false;
+            // Hand the whole detector back to the instancer with its own materials.
+            if (InstancedGeometryDrawer.Active != null)
+            {
+                InstancedGeometryDrawer.Active.SetExcluded(null);
+                InstancedGeometryDrawer.Active.SetOverrideMaterial(null);
+                InstancedGeometryDrawer.Active.SetInstancingActive(true);
+            }
+
+            faintMaterial = null; // destroyed below with the rest of this session's materials
 
             // Update Scene button label
             SceneSwitchButton = GameObject.Find("EButton");
             //UnityEngine.Debug.Log("[TRACK-ANALYSER] Scene Switch Button is set to "+SceneSwitchButton);
             SceneSwitchButton.transform.GetComponentInChildren<TMPro.TextMeshProUGUI>().text = "Edep";
-
-            // Enable line segment colliders
-            foreach (var typeEntry in trackInfo)
-            {
-                foreach (var track in typeEntry.Value)
-                {
-                    NewBehaviourScript.Track currTrack = track.Value;
-                    foreach (var segment in currTrack.segments)
-                    {
-                        segment.GetComponent<Collider>().enabled = true;
-                    }
-                }
-            }
 
             // Show UI elements
             if (carousel != null) carousel.SetActive(true);
@@ -545,42 +630,38 @@ public class TrackAnalyser : MonoBehaviour
             if (edep_grad != null)
                 edep_grad.transform.GetChild(0).gameObject.SetActive(false);
 
-            // Restore original materials and disable colliders for Edep geometries
-            foreach (var geo in edep_bypiece)
-            {
-                GameObject obj = geo.Key;
-                Renderer rend = obj.GetComponent<Renderer>();
-                if (rend != null)
-                {
-                    if (originalMaterials.ContainsKey(obj))
-                    {
-                        rend.material = originalMaterials[obj];
-                    }
-                    else
-                    {
-                        // fallback: faint white
-                        Material mat = new Material(Shader.Find("Standard"));
-                        mat.color = new UnityEngine.Color(1f, 1f, 1f, 0.05f);
-                        mat.SetFloat("_Mode", 3f);
-                        mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-                        mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-                        mat.SetInt("_ZWrite", 0);
-                        mat.DisableKeyword("_ALPHATEST_ON");
-                        mat.EnableKeyword("_ALPHABLEND_ON");
-                        mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-                        mat.renderQueue = 3000;
-                        rend.material = mat;
-                    }
-                }
+            // Detach the materials built for *this* edep session before restoring. The restore loop can
+            // itself create fallback materials, and those must not be in the batch we destroy below.
+            Material[] spentMaterials = coloringMaterials.ToArray();
+            coloringMaterials.Clear();
 
-                // De-interact geometry
-                Collider col = obj.GetComponent<Collider>();
-                if (col != null) col.enabled = false;
+            // Restore the pieces that were actually recolored. Only those were touched -- the rest kept
+            // their own materials throughout and were simply drawn faint by the instancer, so the old
+            // "fallback faint white" branch here would now *introduce* a wrong material rather than
+            // repair one.
+            foreach (var kv in originalMaterials)
+            {
+                Renderer rend = kv.Key != null ? kv.Key.GetComponent<Renderer>() : null;
+                if (rend != null)
+                    rend.sharedMaterial = kv.Value;
             }
 
-            // Clear dictionaries
+            // De-interact the geometry: pieces are only clickable inside edep mode.
+            foreach (var geo in edep_bypiece)
+            {
+                Collider col = geo.Key != null ? geo.Key.GetComponent<Collider>() : null;
+                if (col != null)
+                    col.enabled = false;
+            }
+
+            // Clear dictionaries. The originals are back on the renderers, so this session's coloring
+            // materials are now unreferenced and can be destroyed outright.
             edep_bypiece.Clear();
             originalMaterials.Clear();
+
+            foreach (Material mat in spentMaterials)
+                if (mat != null)
+                    Destroy(mat);
         }
     }
 

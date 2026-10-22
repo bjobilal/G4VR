@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using System.IO;
 using System.Text;
 
@@ -11,18 +11,35 @@ public class FPSLogger : MonoBehaviour
     private float logTimer = 0f;
 
     private string filePath;
+    private StreamWriter writer;
 
     void Start()
     {
         filePath = Path.Combine(Application.persistentDataPath, "fps_log_BC89MB.csv");
 
-        // Write header if file doesn't exist
-        if (!File.Exists(filePath))
-        {
-            File.WriteAllText(filePath, "TimeSinceStart,FPS\n");
-        }
+        bool isNew = !File.Exists(filePath);
+
+        // One handle held open for the session. AppendAllText opened, wrote and closed the file on
+        // every sample, which is a round trip through the Android filesystem once a second -- enough
+        // to show up in the very measurements this is here to take.
+        writer = new StreamWriter(filePath, append: true);
+
+        if (isNew)
+            writer.WriteLine("TimeSinceStart,FPS");
+
+        writer.Flush();
 
         Debug.Log("FPS Log Path: " + filePath);
+    }
+
+    void OnDestroy()
+    {
+        if (writer == null)
+            return;
+
+        writer.Flush();
+        writer.Dispose();
+        writer = null;
     }
 
     void Update()
@@ -43,10 +60,11 @@ public class FPSLogger : MonoBehaviour
 
     void WriteToCSV(float time, float fps)
     {
-        StringBuilder sb = new StringBuilder();
-        sb.AppendLine(time.ToString("F3") + "," + fps.ToString("F2"));
+        if (writer == null)
+            return;
 
-        File.AppendAllText(filePath, sb.ToString());
+        writer.WriteLine(time.ToString("F3") + "," + fps.ToString("F2"));
+        writer.Flush(); // samples are a second apart, so keep the file readable if the app is killed
     }
 
 }

@@ -13,6 +13,16 @@ public class CustomManager : MonoBehaviour
 
     GameObject Geometry;
 
+    // The detector renders as a flat translucent grey in normal (tracks) mode, whatever the GLB's own
+    // materials were authored with. Edep mode replaces it with the energy gradient and restores this on
+    // the way out.
+    public static Color DefaultGeometryColor = new Color(0.6f, 0.6f, 0.6f);
+
+    [Range(0f, 1f)]
+    public float geometryOpacity = 0.25f;
+
+    private Material instancedMaterial;
+
     TextMeshProUGUI error_header;
     TextMeshProUGUI error_message;
 
@@ -33,7 +43,7 @@ public class CustomManager : MonoBehaviour
         catch
         {
             Geometry.SetActive(true);
-            SetOpacity(GameObject.Find("DinklageLikenessSculpt"), 0.05f);
+            SetOpacity(GameObject.Find("DinklageLikenessSculpt"), geometryOpacity);
         }
         Geometry.SetActive(true);
     }
@@ -48,8 +58,58 @@ public class CustomManager : MonoBehaviour
         yield return new WaitForSeconds(0.05f);
         Debug.Log("Setting Opacity...");
 
-        SetOpacity(Geometry.transform.GetChild(0).gameObject, 0.05f);
+        SetOpacity(Geometry.transform.GetChild(0).gameObject, geometryOpacity);
+        ApplyInstancedGeometryMaterial();
     }
+    // Hands InstancedGeometryDrawer a Standard-shader material to draw the detector with.
+    //
+    // This is what actually puts the geometry on screen in a build. SetOpacity above only reaches the
+    // glTF materials, whose transparent variant is stripped from the player (see the comment on
+    // InstancedGeometryDrawer.defaultMaterial), so on device those draws produce nothing at all.
+    private void ApplyInstancedGeometryMaterial()
+    {
+        if (InstancedGeometryDrawer.Active == null)
+            return;
+
+        if (instancedMaterial != null)
+            Destroy(instancedMaterial);
+
+        instancedMaterial = BuildTranslucentMaterial(DefaultGeometryColor, geometryOpacity);
+        InstancedGeometryDrawer.Active.defaultMaterial = instancedMaterial;
+    }
+
+    // Same recipe TrackAnalyser uses for its edep materials -- deliberately, because that path is
+    // already known to render correctly on the headset.
+    public static Material BuildTranslucentMaterial(Color rgb, float opacity)
+    {
+        Material mat = new Material(Shader.Find("Standard"));
+
+        mat.color = new Color(rgb.r, rgb.g, rgb.b, opacity);
+        mat.SetFloat("_Mode", 3f); // Transparent
+        mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+        mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+        mat.SetInt("_ZWrite", 0);
+        mat.DisableKeyword("_ALPHATEST_ON");
+        mat.EnableKeyword("_ALPHABLEND_ON");
+        mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        mat.renderQueue = 3000;
+        mat.enableInstancing = true; // required by Graphics.DrawMeshInstanced
+
+        return mat;
+    }
+
+    private void OnDestroy()
+    {
+        if (instancedMaterial == null)
+            return;
+
+        if (InstancedGeometryDrawer.Active != null && InstancedGeometryDrawer.Active.defaultMaterial == instancedMaterial)
+            InstancedGeometryDrawer.Active.defaultMaterial = null;
+
+        Destroy(instancedMaterial);
+        instancedMaterial = null;
+    }
+
     public static void SetOpacity(GameObject parent, float opacity)
     {
         foreach (Transform child in parent.transform)
@@ -57,9 +117,14 @@ public class CustomManager : MonoBehaviour
             Renderer renderer = child.GetComponent<Renderer>();
             if (renderer != null)
             {
-                foreach (Material mat in renderer.materials)
+                // sharedMaterials, NOT materials. Reading renderer.materials hands back private
+                // per-renderer COPIES -- so these settings landed on copies attached to renderers that
+                // InstancedGeometryDrawer has switched off, and never reached the screen at all. The
+                // drawer draws using the materials it captured from sharedMaterials at import time, so
+                // those are the objects that have to be modified for the detector to look translucent.
+                foreach (Material mat in renderer.sharedMaterials)
                 {
-                    Color color = mat.color;
+                    Color color = DefaultGeometryColor;
                     color.a = opacity;
                     mat.color = color;
                     mat.SetFloat("_Mode", 2);
@@ -77,28 +142,38 @@ public class CustomManager : MonoBehaviour
 
     async Task LoadGLB(string url) // GLB is binary form of GLTF - unity recommends since embedded buffers in gltf is slow apparently. 
     {
+        // Stream the download to a temp file and let glTFast read it as a stream, so the raw GLB never occupies
+        // the managed heap (removes the ~file-size transient spike that starves track loading). See ServerGET.
+        string glbPath = System.IO.Path.Combine(Application.temporaryCachePath, "g4vr_geometry.glb");
+
         using (UnityWebRequest www = UnityWebRequest.Get(url))
         {
-            www.downloadHandler = new DownloadHandlerBuffer();
+            www.downloadHandler = new DownloadHandlerFile(glbPath) { removeFileOnAbort = true };
             var request = www.SendWebRequest();
 
             while (!request.isDone)
-               { 
-                
+               {
+
                 await Task.Yield(); }
 
             if (www.result != UnityWebRequest.Result.Success)
             {
+                TryDeleteFile(glbPath);
                 error_header.text = "URL Error";
                 error_message.text = "There was an error loading data from this address. Please check that it is reachable and try again.";
                 return;
             }
 
-            byte[] data = www.downloadHandler.data;
-            Debug.Log(data.Length);
             var gltf = new GltfImport();
-            //bool success = await gltf.LoadGltfBinary(data, new Uri(url));
-            bool success = await gltf.LoadGltfBinary(data);
+            // Keep textures non-readable and mip-less (glTFast defaults; set explicitly -- textures dominate memory).
+            var importSettings = new ImportSettings
+            {
+                GenerateMipMaps = false,
+                TexturesReadable = false
+            };
+            bool success = await gltf.LoadFile(glbPath, null, importSettings);
+            // glTFast has finished reading the file; delete it to reclaim disk and keep managed memory flat.
+            TryDeleteFile(glbPath);
             Debug.Log(success);
             success = await gltf.InstantiateMainSceneAsync(Geometry.transform);
             if (!success)
@@ -106,9 +181,54 @@ public class CustomManager : MonoBehaviour
             {
                 error_header.text = "Geometry Load Error";
                 error_message.text = "G4VR is unable to load the geometry data from this address. Please check your experiment and try again later";
-            }    
+            }
+
+            // Post-import render optimization (see ServerGET for the full rationale). Disable shadows, cache
+            // each piece's original mesh for TrackAnalyser's per-piece colliders, then hand rendering to
+            // InstancedGeometryDrawer, which collapses the thousands of pieces into ~a dozen instanced draw
+            // calls -- Built-in RP's automatic batchers don't handle this geometry.
+            TrackAnalyser.originalMeshes.Clear();
+            foreach (MeshRenderer mr in Geometry.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                mr.receiveShadows = false;
+                MeshFilter mf = mr.GetComponent<MeshFilter>();
+                if (mf != null && mf.sharedMesh != null)
+                    TrackAnalyser.originalMeshes[mr.gameObject] = mf.sharedMesh;
+            }
+
+            if (Geometry.transform.childCount > 0)
+            {
+                GameObject modelRoot = Geometry.transform.GetChild(0).gameObject;
+                InstancedGeometryDrawer drawer = modelRoot.GetComponent<InstancedGeometryDrawer>();
+                if (drawer == null)
+                    drawer = modelRoot.AddComponent<InstancedGeometryDrawer>();
+                drawer.Build(modelRoot);
+            }
+
+            // Free imported-but-unused assets (the ~903 textures / 0.74 GB). glTFast loads every image declared
+            // in the GLB, but the scene uses only a few materials; GltfImport holds references to all of them,
+            // so we must drop `gltf`, GC it, THEN UnloadUnusedAssets to reclaim the unreferenced textures. Used
+            // assets survive (referenced by the renderers); GltfImport has no finalizer. See ServerGET.
+            gltf = null;
+            System.GC.Collect();
+            Resources.UnloadUnusedAssets();
+            System.GC.Collect();
 
 
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (System.IO.File.Exists(path))
+                System.IO.File.Delete(path);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning($"[CustomManager] Could not delete temp GLB '{path}': {e.Message}");
         }
     }
 }
